@@ -52,7 +52,13 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
   - All three build-plan performance goals are met.
 - **Downloads**, measured live: a 908 KB PDF in 1.1 s through the full redirect chain, saved, linked and marked as downloaded from the internet.
 - **Announcements live check (2026-10-21).** Rust read all 1,380 announcements across 17 courses and opened one detail in each of the 13 nonempty courses. Median list refresh: 237 ms. The 674-item course took 5.43 s across seven pages, 205 KB; cached lists remain visible while refreshing. Counts match the earlier probe; no account content is included in the report.
-- **Checks.** 111 Rust tests (Windows) and 32 Python tests pass. `tuicanvas --smoke` re-verifies live reads, file access and one download; `tuicanvas --dump DIR` renders each screen headlessly, including the Files tab, and downloads one file into a scratch library.
+- **Checks.** 130 Rust tests (Windows) and 32 Python tests pass. `tuicanvas --smoke` re-verifies live reads, file access and one download; `tuicanvas --dump DIR` renders each screen headlessly, including the Files tab, and downloads one file into a scratch library.
+
+- **Images in the terminal** (prototype). Images embedded in assignment, page
+  and announcement text are drawn where the text has them, from the copy the
+  library already downloaded, as half blocks in a box that keeps the aspect
+  ratio and reflows with the width. `TUICANVAS_IMAGES=off` turns them off and
+  leaves the `[n]` marks unchanged. Sharper protocols are detected, not drawn.
 
 ## Known issues and limits
 
@@ -63,7 +69,13 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
 - **Back re-reads the list.** Returning to a list from a detail re-reads it, per the approved "fresh on every entry" rule. This costs one request per Back.
 - **Git Bash** may print sign-in progress as separate lines instead of one updating line. PowerShell and Windows Terminal show the spinner properly.
 - **The baseline is narrow:** one machine, one evening, 10 runs, with the browser headless. Good for medians, not for tail latency.
-- **Images open in an outside app.** Showing images inside the terminal is not done yet (Windows Terminal can display them; a possible later step).
+- **Images in the terminal are a prototype.** Embedded images are drawn as
+  half blocks (`▀`, two pixels per cell) where the text has them. Sixel and the
+  kitty graphics protocol are detected but not drawn, because placing escape
+  sequences inside a `ratatui` frame means reserving cells, repainting fully
+  and suppressing the picture under every overlay; `docs/architecture.md`
+  records what is missing. `TUICANVAS_IMAGES=off` restores the plain `[n]`
+  marks. Other image files still open in an outside app.
 - **Locked and hidden files.** Files Canvas marks as locked are not downloaded (one past lab here). In 8 of 17 courses the instructor hides Files, so the Files tab is empty there; attachments linked from assignments still work. Two linked files return 403 and can only be opened in the browser.
 - **Out of scope for now:** discussions and inbox (links to them open in the browser); text-entry submissions remain in Milestone 10. Quizzes and assessments are permanently out of scope.
 

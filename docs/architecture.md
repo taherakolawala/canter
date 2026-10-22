@@ -78,6 +78,7 @@ flowchart LR
 | App state | `src/app.rs` | Pure state machine. Messages in (keys, fetch results, download progress, ticks); effects out (fetch, download, open a file, show a folder, open URL, sign in). Owns navigation, filtering, freshness rules and where each file goes. |
 | Runtime | `src/tui.rs` | Terminal setup and restore, input thread, async executor and download slots, sign-in handoff, opening files and folders, headless `--dump` mode |
 | Rendering | `src/ui.rs`, `src/theme.rs`, `src/html.rs` | Screens, the Assignments/Files tabs, the files & links list, colours, description HTML to terminal text with links numbered to match the list |
+| Inline images | `src/images.rs` | Terminal capability detection, reading an image out of the library, fitting it to a box of text cells, and drawing it as half blocks |
 | Diagnostics | `src/diag.rs` | Endpoint templates, status, bytes and timings; optional JSONL log. Never URLs with ids, headers or bodies. |
 | Live check | `src/smoke.rs` | Read-only verification against Canvas that writes a metadata-only report |
 | Sign-in helper | `tools/terminal_login.py`, `tools/auth_ui.py`, `tools/auth_session.py` | Browser-driven login, the one-line status display, DPAPI save, native verification |
@@ -372,3 +373,74 @@ The tab and detail use distinct `ResourceKey` variants, so snapshots, request ge
 `/api/v1/courses/:id/modules?include[]=items&include[]=content_details` returns modules with their items; a module whose items Canvas leaves out is read separately. The Modules screen is one flat list of module headings and items (`ModuleRow`); headings are not selectable. Item ids, content ids and page URL names are validated before they are put into a request path or file name (`valid_slug`). `/api/v1/courses/:id/pages/:url` reads one page; its key, snapshot and render cache are separate, and page links in any HTML (`/courses/:id/pages/:url`) classify as `Target::Page` and open in the reader.
 
 A module file is placed after a fresh read of its details. When Files is shown the course's folder list is read too (or its saved copy used) so the file lands in `Class Files` under its Canvas folder; when Files is hidden the folder read would fail with 403, so the file goes to `Module Files/<module>`. Nothing is written to Canvas: module progress is not marked from the reader.
+
+## Images in the terminal
+
+Images embedded in assignment, page and announcement text are drawn where the
+text has them. `images.rs` owns all of it; `ui.rs` calls it once where it wraps
+the text and once where it draws a body line.
+
+- **The file is already there.** `html.rs` turns each `<img>` into an
+  `[image: alt][n]` mark, where `n` is the image's place in the page's files &
+  links list, and opening a page already downloads its images into the library
+  (removed after 30 days unused, see **Files and the local library**). This
+  module only reads the local copy. It never requests anything.
+- **Half blocks.** A cell is drawn as the upper half block `▀` with the top
+  pixel as its foreground colour and the bottom pixel as its background, so one
+  cell carries two pixels and a row of cells is two pixel rows. That needs only
+  truecolor, which every terminal the reader targets has, and it looks
+  deliberately low-resolution.
+- **A bounded box.** `fit` gives an image of `w` by `h` pixels a box of at most
+  72 cells across and 20 down, inside the page's text width, keeping the aspect
+  ratio (a cell counts as one pixel wide and two tall) and never enlarging past
+  one pixel per half cell.
+- **The scroll arithmetic is unchanged.** The box's rows are inserted into the
+  body as ordinary blank text lines, with a map from line index to the cells
+  drawn there. Everything that counts, scrolls or skips body lines counts the
+  image's rows too, because they are lines. The mark line itself is kept, so the
+  number still refers to the files & links entry.
+- **Reflow.** Placement happens inside the same pass that wraps the text, which
+  `DetailRender` already caches per page version and terminal width, so a resize
+  re-wraps and re-places together and nothing else re-decodes.
+- **Caps.** Files over 24 MB are not opened; images whose header declares more
+  than 16 megapixels are not decoded; the decoder may allocate at most 96 MB;
+  and all the images on one page share a 400 ms decoding budget. Anything that
+  fails, times out or is not a readable image keeps its `[n]` mark. Nothing here
+  can panic on a malformed file: every error becomes "no image".
+
+### The setting
+
+`TUICANVAS_IMAGES=off` (also `0`, `no`, `false`, `none`) turns images off
+entirely, which leaves the `[n]` marks exactly as they were before this module
+existed. Anything else, including the variable being unset, leaves them on.
+`NO_COLOR` turns them off too, since half blocks are nothing but colour.
+`TUICANVAS_IMAGE_PROTOCOL=halfblock|sixel|kitty` forces a protocol instead of
+detecting one, for trying one out; `auto` and anything else mean "detect".
+
+### Detection and the sharper protocols
+
+Detection lives in one place, `images::detect`, called once from `tui::run`
+after the terminal is in raw mode and before the input thread starts reading,
+so the terminal's reply arrives as input bytes, is not echoed, and is not taken
+for keystrokes. It writes a primary device attributes query followed by a device
+status report; the status report is answered by every terminal, so a terminal
+that ignores the first query ends the read at once instead of costing the whole
+250 ms timeout. Attribute 4 in the reply means sixel. The kitty graphics
+protocol is taken from `KITTY_WINDOW_ID` and `TERM`, which is what kitty itself
+documents. Everything else reads the remembered answer through
+`images::protocol`, which is "half blocks" until detection has run — so the
+headless `--dump` mode and the tests never depend on a terminal being there.
+
+The sharper protocols are detected but **not drawn**. Both work by writing
+escape sequences into the screen at a cursor position, and `ratatui` owns that
+screen: it keeps its own cell buffer and writes only the cells that changed
+between frames. Making sixel work means reserving cells that `ratatui` draws as
+blanks, emitting the payload after each frame flush from `tui::run`, forcing a
+full repaint so scrolling does not leave the previous picture behind, and
+suppressing all of it whenever an overlay (the actions menu, the help screen)
+draws over the box. That is a change to the frame loop and to every screen that
+can cover a page, for a path that cannot be verified from a test — so this
+prototype detects the capability, reports it, and draws half blocks everywhere.
+What is missing before the sharper path can be added: the pixel size of a cell
+(a `CSI 16 t` query), a sixel encoder with a 256-colour quantizer, and a way to
+place out-of-band output in a `ratatui` frame.
