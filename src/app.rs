@@ -267,6 +267,11 @@ pub enum Msg {
         assignment_id: String,
         result: Result<String, String>,
     },
+    MessageSent {
+        /// The conversation replied to, if it was a reply.
+        conversation_id: Option<String>,
+        result: Result<String, String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -292,6 +297,8 @@ pub enum Effect {
         assignment_id: String,
         files: Vec<FileChoice>,
     },
+    /// Send an Inbox message the user confirmed on the review screen.
+    SendMessage(Box<crate::inbox::Send>),
 }
 
 #[derive(Clone, Debug)]
@@ -302,6 +309,75 @@ pub struct SubmissionDraft {
     pub files: Vec<FileChoice>,
     pub reviewing: bool,
     pub busy: bool,
+}
+
+/// Who a message being written will go to.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Audience {
+    /// Everyone already in a conversation.
+    Conversation {
+        conversation_id: String,
+        subject: String,
+        who: String,
+    },
+    /// The teachers of one course, each of whom gets a private copy.
+    Teachers {
+        course_id: String,
+        course_name: String,
+    },
+}
+
+/// The box of a message being written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MessageField {
+    Subject,
+    Body,
+}
+
+/// A message being written. Nothing leaves the reader until the review
+/// screen is confirmed with the key that says so.
+#[derive(Clone, Debug)]
+pub struct MessageDraft {
+    pub to: Audience,
+    pub subject: String,
+    pub body: String,
+    pub field: MessageField,
+    pub reviewing: bool,
+    pub busy: bool,
+}
+
+impl MessageDraft {
+    /// The boxes this message has: a reply keeps the conversation's subject.
+    pub fn fields(&self) -> &'static [MessageField] {
+        match self.to {
+            Audience::Conversation { .. } => &[MessageField::Body],
+            Audience::Teachers { .. } => &[MessageField::Subject, MessageField::Body],
+        }
+    }
+
+    /// Exactly what confirming will send.
+    pub fn send(&self) -> crate::inbox::Send {
+        match &self.to {
+            Audience::Conversation {
+                conversation_id, ..
+            } => crate::inbox::Send::Reply {
+                conversation_id: conversation_id.clone(),
+                body: self.body.clone(),
+            },
+            Audience::Teachers { course_id, .. } => crate::inbox::Send::ToTeachers {
+                course_id: course_id.clone(),
+                subject: self.subject.clone(),
+                body: self.body.clone(),
+            },
+        }
+    }
+
+    fn text_mut(&mut self) -> &mut String {
+        match self.field {
+            MessageField::Subject => &mut self.subject,
+            MessageField::Body => &mut self.body,
+        }
+    }
 }
 
 /// What has focus on an assignment or announcement page.
@@ -611,6 +687,8 @@ pub struct App {
     pub inbox_folder: crate::inbox::Folder,
     /// The selected conversation in that folder.
     pub inbox_item: usize,
+    /// A message being written, if any.
+    pub message: Option<MessageDraft>,
 }
 
 fn matches_filter(text: &str, filter: &str) -> bool {
@@ -710,6 +788,7 @@ impl App {
             conversation_reads,
             inbox_folder: crate::inbox::Folder::default(),
             inbox_item: 0,
+            message: None,
         }
     }
 
@@ -1131,6 +1210,24 @@ impl App {
                 if let Some(e) = self.request(ResourceKey::Assignments(course_id), true) {
                     effects.push(e);
                 }
+                effects
+            }
+            Msg::MessageSent {
+                conversation_id,
+                result,
+            } => {
+                self.message = None;
+                self.notice = Some(result.clone().unwrap_or_else(|e| e));
+                self.dirty = true;
+                if result.is_err() {
+                    return vec![];
+                }
+                // Show what Canvas now has: the thread, and the folder lists.
+                let mut effects = Vec::new();
+                if let Some(id) = conversation_id {
+                    effects.extend(self.request(ResourceKey::Conversation(id), true));
+                }
+                effects.extend(self.read_inbox(true));
                 effects
             }
         }
@@ -2263,6 +2360,131 @@ impl App {
         vec![]
     }
 
+    /// `R` on a conversation: reply to everyone in it. The conversation must
+    /// be freshly read, so the review screen shows what is really there.
+    fn start_reply(&mut self) -> Vec<Effect> {
+        let ViewKind::Conversation {
+            conversation_id, ..
+        } = self.view().kind.clone()
+        else {
+            return vec![];
+        };
+        let Some(resource) = self.conversation_details.get(&conversation_id) else {
+            self.notice = Some("Wait for the conversation to load before replying.".into());
+            return vec![];
+        };
+        if resource.origin != Origin::Network
+            || !matches!(resource.sync, SyncState::Idle)
+            || !resource
+                .fetched_at
+                .is_some_and(|at| Utc::now() - at < chrono::Duration::minutes(2))
+        {
+            self.notice = Some("Reading the conversation again. Press R when synced.".into());
+            return self
+                .request(ResourceKey::Conversation(conversation_id), true)
+                .into_iter()
+                .collect();
+        }
+        let Some(detail) = &resource.data else {
+            return vec![];
+        };
+        self.message = Some(MessageDraft {
+            to: Audience::Conversation {
+                conversation_id,
+                subject: detail.base.subject().to_string(),
+                who: detail.base.who(),
+            },
+            subject: detail.base.subject().to_string(),
+            body: String::new(),
+            field: MessageField::Body,
+            reviewing: false,
+            busy: false,
+        });
+        vec![]
+    }
+
+    /// `N` on the home screen: a new message to the selected course's
+    /// teachers. The course comes from the course list, which the review
+    /// screen names in full.
+    fn start_message_to_teachers(&mut self) -> Vec<Effect> {
+        if self.courses.origin != Origin::Network {
+            self.notice = Some("Wait for the course list to sync, then press N.".into());
+            return vec![];
+        }
+        let course = self
+            .visible_rows()
+            .get(self.view().selected)
+            .and_then(|&i| self.courses.data.as_ref()?.get(i))
+            .filter(|c| crate::model::valid_id(&c.id))
+            .map(|c| (c.id.clone(), c.title().to_string()));
+        let Some((course_id, course_name)) = course else {
+            self.notice = Some("Select a course first: its teachers get the message.".into());
+            return vec![];
+        };
+        self.message = Some(MessageDraft {
+            to: Audience::Teachers {
+                course_id,
+                course_name,
+            },
+            subject: String::new(),
+            body: String::new(),
+            field: MessageField::Subject,
+            reviewing: false,
+            busy: false,
+        });
+        vec![]
+    }
+
+    /// Writing and reviewing a message. The request leaves only from the
+    /// review screen, and only for `Act::Confirm`.
+    fn message_act(&mut self, act: Act) -> Vec<Effect> {
+        let draft = self.message.as_mut().expect("checked by the caller");
+        if draft.busy {
+            return vec![];
+        }
+        if draft.reviewing {
+            match act {
+                Act::InputCancel => draft.reviewing = false,
+                Act::Confirm => {
+                    let send = draft.send();
+                    if let Some(problem) = send.problem() {
+                        draft.reviewing = false;
+                        self.notice = Some(problem.to_string());
+                        return vec![];
+                    }
+                    draft.busy = true;
+                    return vec![Effect::SendMessage(Box::new(send))];
+                }
+                _ => {}
+            }
+            return vec![];
+        }
+        let fields = draft.fields();
+        match act {
+            Act::InputCancel => self.message = None,
+            Act::InputClear => draft.text_mut().clear(),
+            Act::NextSection | Act::PrevSection => {
+                let at = fields.iter().position(|f| *f == draft.field).unwrap_or(0);
+                let n = fields.len();
+                draft.field = fields[(at + if act == Act::NextSection { 1 } else { n - 1 }) % n];
+            }
+            // Enter is a new line in the message, and moves on from a subject.
+            Act::InputDone => match draft.field {
+                MessageField::Body if draft.body.chars().count() < crate::inbox::MAX_BODY => {
+                    draft.body.push('\n')
+                }
+                MessageField::Body => {}
+                MessageField::Subject => draft.field = MessageField::Body,
+            },
+            Act::InputComplete => match draft.send().problem() {
+                Some(problem) => self.notice = Some(problem.to_string()),
+                None => draft.reviewing = true,
+            },
+            _ => {}
+        }
+        vec![]
+    }
+
     // ---- Keyboard ----
     //
     // Keys are looked up in `keys::BINDINGS` for the scopes active now, and the
@@ -2286,6 +2508,15 @@ impl App {
 
     /// Scopes of the screen under any open menu or help.
     pub fn screen_scopes(&self) -> Vec<Scope> {
+        if let Some(draft) = &self.message {
+            return if draft.busy {
+                vec![]
+            } else if draft.reviewing {
+                vec![Scope::MessageReview]
+            } else {
+                vec![Scope::Compose]
+            };
+        }
         if let Some(draft) = &self.submission {
             return if draft.busy {
                 vec![]
@@ -2426,6 +2657,7 @@ impl App {
         if self.help.is_some()
             || self.menu.is_some()
             || self.submission.is_some()
+            || self.message.is_some()
             || self.view().filtering
         {
             return true;
@@ -2484,6 +2716,11 @@ impl App {
                 None => self.sections().len() > 1,
             },
             Act::HideCourse => !self.visible_rows().is_empty(),
+            Act::Reply => {
+                matches!(&self.view().kind, ViewKind::Conversation { conversation_id, .. }
+                if self.conversation_details.get(conversation_id).is_some_and(|r| r.data.is_some()))
+            }
+            Act::NewMessage => !self.visible_rows().is_empty(),
             Act::Search => self.is_list(),
             _ => true,
         }
@@ -2579,6 +2816,24 @@ impl App {
             menu.selected = 0;
             return;
         }
+        if let Some(draft) = &mut self.message {
+            if draft.reviewing || draft.busy {
+                return;
+            }
+            let limit = match draft.field {
+                MessageField::Subject => crate::inbox::MAX_SUBJECT,
+                MessageField::Body => crate::inbox::MAX_BODY,
+            };
+            // A held Backspace would wipe the field; one character per press.
+            if erase && key.kind != KeyEventKind::Repeat {
+                draft.text_mut().pop();
+            } else if let Some(c) = typed
+                && draft.text_mut().chars().count() < limit
+            {
+                draft.text_mut().push(c);
+            }
+            return;
+        }
         if let Some(draft) = &mut self.submission {
             // A held Backspace would wipe the path; one character per press.
             if erase && key.kind != KeyEventKind::Repeat {
@@ -2617,6 +2872,9 @@ impl App {
         }
         if self.submission.is_some() {
             return self.submission_act(act);
+        }
+        if self.message.is_some() {
+            return self.message_act(act);
         }
         if self.view().filtering {
             return self.filter_act(act);
@@ -2707,6 +2965,8 @@ impl App {
                 self.reveal(root)
             }
             Act::SignIn => vec![Effect::Login],
+            Act::Reply => self.start_reply(),
+            Act::NewMessage => self.start_message_to_teachers(),
             Act::InputDone
             | Act::InputCancel
             | Act::InputComplete
@@ -4152,6 +4412,10 @@ mod tests {
         Msg::Key(KeyEvent::new(code, KeyModifiers::NONE))
     }
 
+    fn ctrl(c: char) -> Msg {
+        Msg::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    }
+
     fn course(id: &str, name: &str) -> Course {
         Course {
             id: id.into(),
@@ -5104,6 +5368,120 @@ mod tests {
             }
             assert_eq!(app.conversation_status(&summary), "Unread");
         }
+    }
+
+    /// The whole reply path: R opens a draft, typing fills it, the review
+    /// names the recipients, and only y produces the request.
+    #[test]
+    fn a_reply_is_reviewed_and_sent_only_on_an_explicit_key() {
+        let mut app = inbox_app(None);
+        let summary = conversation("5", "Lab 3 feedback", "unread");
+        let (k, r) = fetch_of(&app.update(key(KeyCode::Enter)));
+        let detail = crate::inbox::Detail {
+            base: summary.clone(),
+            messages: vec![crate::inbox::Message {
+                id: "9".into(),
+                body: Some("How did the lab go?".into()),
+                ..Default::default()
+            }],
+        };
+        deliver(&mut app, k, r, Payload::Conversation(Box::new(detail)));
+
+        assert!(app.update(key(KeyCode::Char('R'))).is_empty());
+        assert!(app.message.is_some(), "R opens a draft");
+        assert_eq!(app.scopes(), vec![Scope::Compose]);
+        // An empty message cannot even be reviewed.
+        app.update(ctrl('d'));
+        assert!(!app.message.as_ref().unwrap().reviewing);
+        for c in "It went well".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        app.update(key(KeyCode::Enter));
+        app.update(key(KeyCode::Char('.')));
+        assert_eq!(app.message.as_ref().unwrap().body, "It went well\n.");
+
+        // Reviewing shows what will be sent and sends nothing by itself.
+        assert!(app.update(ctrl('d')).is_empty());
+        assert!(app.message.as_ref().unwrap().reviewing);
+        assert_eq!(app.scopes(), vec![Scope::MessageReview]);
+        let draft = app.message.clone().unwrap();
+        assert!(matches!(&draft.to, Audience::Conversation { who, .. } if who.contains("Dr Ada")));
+        assert_eq!(
+            draft.send(),
+            crate::inbox::Send::Reply {
+                conversation_id: "5".into(),
+                body: "It went well\n.".into(),
+            }
+        );
+        // Every other key leaves the request unmade.
+        for code in [KeyCode::Char('x'), KeyCode::Enter, KeyCode::Down] {
+            assert!(app.update(key(code)).is_empty(), "{code:?} sent something");
+        }
+        let effects = app.update(key(KeyCode::Char('y')));
+        assert_eq!(effects.len(), 1, "{effects:?}");
+        assert!(matches!(
+            &effects[0],
+            Effect::SendMessage(m) if **m == draft.send()
+        ));
+        assert!(app.message.as_ref().unwrap().busy);
+
+        // Canvas accepting it clears the draft and reads the thread again.
+        let effects = app.update(Msg::MessageSent {
+            conversation_id: Some("5".into()),
+            result: Ok("Reply sent.".into()),
+        });
+        assert!(app.message.is_none());
+        let keys: Vec<ResourceKey> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Fetch { key, .. } => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            keys.contains(&ResourceKey::Conversation("5".into())),
+            "{keys:?}"
+        );
+    }
+
+    /// Esc anywhere in the flow throws the message away without a request,
+    /// and a new message to a course's teachers names the course it found.
+    #[test]
+    fn a_message_to_teachers_names_the_course_and_esc_sends_nothing() {
+        let mut app = app_with_courses();
+        assert!(app.update(key(KeyCode::Char('N'))).is_empty());
+        let draft = app.message.clone().expect("N opens a draft");
+        assert!(matches!(
+            &draft.to,
+            Audience::Teachers { course_id, course_name }
+                if course_id == "10" && course_name == "GPU Computing"
+        ));
+        assert_eq!(draft.field, MessageField::Subject);
+        for c in "Office hours".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        // Enter moves on from the subject rather than adding a line to it.
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.message.as_ref().unwrap().subject, "Office hours");
+        assert_eq!(app.message.as_ref().unwrap().field, MessageField::Body);
+        for c in "Are you free Friday?".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            app.message.as_ref().unwrap().send(),
+            crate::inbox::Send::ToTeachers {
+                course_id: "10".into(),
+                subject: "Office hours".into(),
+                body: "Are you free Friday?".into(),
+            }
+        );
+        app.update(ctrl('d'));
+        assert!(app.message.as_ref().unwrap().reviewing);
+        // Esc on the review goes back to writing; Esc again discards it.
+        assert!(app.update(key(KeyCode::Esc)).is_empty());
+        assert!(!app.message.as_ref().unwrap().reviewing);
+        assert!(app.update(key(KeyCode::Esc)).is_empty());
+        assert!(app.message.is_none(), "Esc discards the message");
     }
 
     #[test]

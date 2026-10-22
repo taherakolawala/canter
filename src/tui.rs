@@ -74,6 +74,29 @@ impl Executor {
         });
     }
 
+    /// Send one Inbox message. Reached only from the review screen, after the
+    /// user pressed the key that confirms it.
+    fn send_message(&self, message: crate::inbox::Send) {
+        let client = self.client.clone();
+        let session = self.session.clone();
+        let session_path = self.session_path.clone();
+        let tx = self.tx.clone();
+        let conversation_id = match &message {
+            crate::inbox::Send::Reply {
+                conversation_id, ..
+            } => Some(conversation_id.clone()),
+            crate::inbox::Send::ToTeachers { .. } => None,
+        };
+        self.rt.spawn(async move {
+            let result = crate::inbox::send(&client, &message).await;
+            persist_rotated_cookies(&client, &session, &session_path);
+            let _ = tx.send(Msg::MessageSent {
+                conversation_id,
+                result,
+            });
+        });
+    }
+
     pub(crate) fn session_handle(&self) -> Arc<Mutex<SessionFile>> {
         self.session.clone()
     }
@@ -653,6 +676,7 @@ pub fn run(config: &Config, options: Options) -> Result<(), String> {
                     assignment_id,
                     files,
                 } => executor.submit(course_id, assignment_id, files),
+                Effect::SendMessage(message) => executor.send_message(*message),
                 Effect::Login => {
                     input.pause();
                     ratatui::restore();

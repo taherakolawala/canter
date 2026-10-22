@@ -42,6 +42,8 @@ pub enum Act {
     ShowHidden,
     OpenLibrary,
     SignIn,
+    Reply,
+    NewMessage,
     InputDone,
     InputCancel,
     InputComplete,
@@ -51,7 +53,7 @@ pub enum Act {
 
 impl Act {
     #[cfg(test)]
-    pub const ALL: [Act; 32] = [
+    pub const ALL: [Act; 34] = [
         Act::Up,
         Act::Down,
         Act::Left,
@@ -79,6 +81,8 @@ impl Act {
         Act::ShowHidden,
         Act::OpenLibrary,
         Act::SignIn,
+        Act::Reply,
+        Act::NewMessage,
         Act::InputDone,
         Act::InputCancel,
         Act::InputComplete,
@@ -126,6 +130,10 @@ pub enum Scope {
     PathInput,
     /// Confirming a submission.
     Review,
+    /// Writing a message to send through the Canvas Inbox.
+    Compose,
+    /// Reviewing a message before it is sent.
+    MessageReview,
     Menu,
     /// Typing in the actions menu's search box.
     MenuSearch,
@@ -452,6 +460,14 @@ pub static BINDINGS: &[Binding] = &[
     b(Act::SignIn, &[], &[Screen], "sign in")
         .title("Sign in again")
         .menu('L', Group::App),
+    // The Inbox.
+    b(Act::Reply, &[ch('R')], &[Conversation], "reply")
+        .title("Reply to everyone in this conversation")
+        .menu('R', Group::Here)
+        .hint(5),
+    b(Act::NewMessage, &[ch('N')], &[Courses], "message")
+        .title("Write to this course's teachers")
+        .menu('N', Group::Selected),
     // Text boxes and confirmation.
     b(Act::InputDone, &[ENTER], &[Filter], "keep")
         .title("Keep this search")
@@ -486,6 +502,42 @@ pub static BINDINGS: &[Binding] = &[
         .title("Go back and edit the files")
         .hint(2)
         .shown("n/Esc"),
+    // Writing a message, and the review that precedes sending it.
+    b(Act::InputDone, &[ENTER], &[Compose], "new line")
+        .title("Start a new line, or move on from the subject")
+        .hint(1),
+    b(Act::InputComplete, &[Key::Ctrl('d')], &[Compose], "review")
+        .title("Review the message before it is sent")
+        .hint(2),
+    b(Act::NextSection, &[TAB], &[Compose], "next field")
+        .title("Move to the next field")
+        .hint(3),
+    b(Act::PrevSection, &[BACKTAB], &[Compose], "previous field")
+        .title("Move to the previous field")
+        .hint(4),
+    b(
+        Act::InputClear,
+        &[Key::Ctrl('u')],
+        &[Compose],
+        "clear field",
+    )
+    .title("Clear this field")
+    .hint(5),
+    b(Act::InputCancel, &[ESC], &[Compose], "discard")
+        .title("Discard the message")
+        .hint(6),
+    b(Act::Confirm, &[ch('y')], &[MessageReview], "send now")
+        .title("Send this message through the Canvas Inbox")
+        .hint(1),
+    b(
+        Act::InputCancel,
+        &[ESC, ch('n')],
+        &[MessageReview],
+        "keep writing",
+    )
+    .title("Go back and edit the message")
+    .hint(2)
+    .shown("n/Esc"),
 ];
 
 /// Core keys and the one action each may have wherever it is bound
@@ -510,7 +562,7 @@ pub const CORE: &[(Key, Act)] = &[
 pub fn typing(scopes: &[Scope]) -> bool {
     scopes
         .iter()
-        .any(|s| matches!(s, Filter | PathInput | MenuSearch))
+        .any(|s| matches!(s, Filter | PathInput | MenuSearch | Compose))
 }
 
 pub fn key_of(event: &KeyEvent) -> Key {
@@ -680,6 +732,8 @@ mod tests {
             vec![Filter],
             vec![PathInput],
             vec![Review],
+            vec![Compose],
+            vec![MessageReview],
             vec![Menu],
             vec![MenuSearch],
             vec![Help],
@@ -721,7 +775,8 @@ mod tests {
     fn core_keys_keep_one_meaning() {
         for scopes in contexts()
             .into_iter()
-            .filter(|s| !typing(s) && !s.contains(&Review))
+            // The confirmation screens bind Esc to leaving the draft alone.
+            .filter(|s| !typing(s) && !s.contains(&Review) && !s.contains(&MessageReview))
         {
             for (key, act) in CORE {
                 if let Some(binding) = lookup(*key, &scopes) {

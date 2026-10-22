@@ -218,6 +218,91 @@ fn draw_submission(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>)
     );
 }
 
+/// Writing a message, and the review that precedes sending it. The review
+/// shows the recipients, the subject and the body exactly as they will be
+/// sent, and says which key sends them.
+fn draw_message(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(draft) = &app.message else {
+        return;
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        if draft.reviewing || draft.busy {
+            "Review message"
+        } else {
+            "Write a message"
+        },
+        theme::bold(),
+    ))];
+    match &draft.to {
+        crate::app::Audience::Conversation { who, subject, .. } => {
+            lines.push(Line::from(format!("To: {who}")));
+            lines.push(Line::from(format!("Subject: {subject}")));
+            lines.push(Line::from(Span::styled(
+                "Everyone in the conversation receives this reply.",
+                theme::muted(),
+            )));
+        }
+        crate::app::Audience::Teachers { course_name, .. } => {
+            lines.push(Line::from(format!("To: teachers of {course_name}")));
+            lines.push(Line::from(if draft.reviewing || draft.busy {
+                format!("Subject: {}", draft.subject)
+            } else {
+                format!(
+                    "Subject: {}{}",
+                    draft.subject,
+                    if draft.field == crate::app::MessageField::Subject {
+                        "\u{258f}"
+                    } else {
+                        ""
+                    }
+                )
+            }));
+            lines.push(Line::from(Span::styled(
+                "Each teacher of the course receives a separate, private copy.",
+                theme::muted(),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+    let typing_body =
+        !draft.reviewing && !draft.busy && draft.field == crate::app::MessageField::Body;
+    let body: Vec<&str> = draft.body.split('\n').collect();
+    for (i, text) in body.iter().enumerate() {
+        let last = i + 1 == body.len();
+        lines.push(Line::from(if typing_body && last {
+            format!("{text}\u{258f}")
+        } else {
+            (*text).to_string()
+        }));
+    }
+    lines.push(Line::from(""));
+    if draft.busy {
+        lines.push(Line::from(Span::styled(
+            "Sending\u{2026} Please wait.",
+            theme::syncing(),
+        )));
+    } else if draft.reviewing {
+        lines.push(Line::from(Span::styled(
+            "Press y to send this message through the Canvas Inbox.",
+            theme::alert(),
+        )));
+        lines.push(Line::from(
+            "Press n or Esc to go back and keep writing. Nothing is sent until you press y.",
+        ));
+    } else {
+        lines.push(Line::from(
+            "Type the message. Enter starts a new line; Ctrl+D opens the review.",
+        ));
+        lines.push(Line::from(
+            "Ctrl+U clears this field; Esc discards the message. Nothing is sent before the review.",
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+        area,
+    );
+}
+
 fn submission_type(t: &str) -> &str {
     match t {
         "online_upload" => "File upload",
@@ -248,7 +333,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
     draw_top(frame, top, app, now);
-    if app.submission.is_some() {
+    if app.message.is_some() {
+        draw_message(frame, main, app);
+    } else if app.submission.is_some() {
         draw_submission(frame, main, app, now);
     } else {
         match app.view().kind.clone() {
@@ -2972,6 +3059,55 @@ mod tests {
             });
         }
         app
+    }
+
+    #[test]
+    fn a_message_review_shows_its_recipients_and_the_key_that_sends_it() {
+        let mut app = home_app(vec![]);
+        app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('N'),
+            KeyModifiers::NONE,
+        )));
+        for c in "Office hours".chars() {
+            app.update(Msg::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        }
+        app.update(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        for c in "Are you free Friday?".chars() {
+            app.update(Msg::Key(KeyEvent::new(
+                KeyCode::Char(c),
+                KeyModifiers::NONE,
+            )));
+        }
+        // Writing says what the keys do and that nothing has been sent.
+        let writing = screen(&mut app, 90, 24);
+        for part in [
+            "Write a message",
+            "teachers of GPU Computing",
+            "Office hours",
+            "Are you free Friday?",
+            "Ctrl+D opens the review",
+        ] {
+            assert!(writing.contains(part), "{part} missing:\n{writing}");
+        }
+        app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+        )));
+        let review = screen(&mut app, 90, 24);
+        println!("{review}\n");
+        for part in [
+            "Review message",
+            "teachers of GPU Computing",
+            "private copy",
+            "Subject: Office hours",
+            "Are you free Friday?",
+            "Press y to send",
+        ] {
+            assert!(review.contains(part), "{part} missing:\n{review}");
+        }
     }
 
     #[test]

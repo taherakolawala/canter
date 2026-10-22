@@ -402,6 +402,129 @@ pub async fn detail(client: &CanvasClient, id: &str) -> Result<(Detail, FetchSta
     Ok((detail, stats))
 }
 
+/// Exactly what a confirmed message will send. Built on the review screen,
+/// so what the user read there is what goes to Canvas.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Send {
+    /// One more message in an existing conversation, to everyone in it.
+    Reply {
+        conversation_id: String,
+        body: String,
+    },
+    /// A new conversation with a course's teachers.
+    ToTeachers {
+        course_id: String,
+        subject: String,
+        body: String,
+    },
+}
+
+/// The longest message Canvas is asked to take. Well under its own limit;
+/// enough for anything typed into a terminal box.
+pub const MAX_BODY: usize = 8_000;
+pub const MAX_SUBJECT: usize = 255;
+
+impl Send {
+    /// Why this cannot be sent, if it cannot. Checked again here so no path
+    /// to the request can skip it.
+    pub fn problem(&self) -> Option<&'static str> {
+        let (body, subject) = match self {
+            Send::Reply { body, .. } => (body, None),
+            Send::ToTeachers { subject, body, .. } => (body, Some(subject)),
+        };
+        if body.trim().is_empty() {
+            return Some("The message is empty.");
+        }
+        if body.chars().count() > MAX_BODY {
+            return Some("The message is too long.");
+        }
+        if subject.is_some_and(|s| s.trim().is_empty()) {
+            return Some("The subject is empty.");
+        }
+        if subject.is_some_and(|s| s.chars().count() > MAX_SUBJECT) {
+            return Some("The subject is too long.");
+        }
+        match self {
+            Send::Reply {
+                conversation_id: id,
+                ..
+            } if !valid_id(id) => Some("Invalid conversation."),
+            Send::ToTeachers { course_id, .. } if !valid_id(course_id) => Some("Invalid course."),
+            _ => None,
+        }
+    }
+}
+
+/// Send a message. Called only after the user confirmed the review screen.
+/// Sending a reply does let Canvas mark that conversation read, which is
+/// what sending means; nothing else here changes read state.
+pub async fn send(client: &CanvasClient, message: &Send) -> Result<String, String> {
+    if let Some(problem) = message.problem() {
+        return Err(problem.to_string());
+    }
+    match message {
+        Send::Reply {
+            conversation_id,
+            body,
+        } => {
+            let sent: Detail = client
+                .post_form(
+                    &format!("/api/v1/conversations/{conversation_id}/add_message"),
+                    &[("body", body.as_str())],
+                )
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Reply may not have been sent: {}. Refresh before trying again.",
+                        e.describe()
+                    )
+                })?;
+            if sent.base.id != *conversation_id || sent.messages.is_empty() {
+                return Err(
+                    "Canvas did not confirm the reply. Refresh to check whether it was sent."
+                        .into(),
+                );
+            }
+            Ok("Reply sent.".into())
+        }
+        Send::ToTeachers {
+            course_id,
+            subject,
+            body,
+        } => {
+            // Canvas addresses a course's teachers by context code. Without
+            // group_conversation it gives each teacher a private copy.
+            let recipient = format!("course_{course_id}_teachers");
+            let created: Vec<Summary> = client
+                .post_form(
+                    "/api/v1/conversations",
+                    &[
+                        ("recipients[]", recipient.as_str()),
+                        ("subject", subject.as_str()),
+                        ("body", body.as_str()),
+                        ("context_code", &format!("course_{course_id}")),
+                        ("mode", "sync"),
+                    ],
+                )
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Message may not have been sent: {}. Check your Sent folder.",
+                        e.describe()
+                    )
+                })?;
+            if created.is_empty() || created.iter().any(|c| !valid_id(&c.id)) {
+                return Err("Canvas did not confirm the message. Check your Sent folder.".into());
+            }
+            Ok(format!(
+                "Message sent to {} teacher{}.",
+                created.len(),
+                if created.len() == 1 { "" } else { "s" }
+            ))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,6 +773,115 @@ mod tests {
         let lines = crate::html::render(&document, 60, "https://ufl.instructure.com");
         assert!(lines.iter().any(|l| l.contains("Dr Ada")), "{lines:?}");
         assert!(lines.iter().any(|l| l.contains("Hello")), "{lines:?}");
+    }
+
+    #[tokio::test]
+    async fn nothing_is_sent_until_the_message_passes_its_own_checks() {
+        let empty = Send::Reply {
+            conversation_id: "5".into(),
+            body: "   \n ".into(),
+        };
+        let cases = [
+            empty.clone(),
+            Send::Reply {
+                conversation_id: "../x".into(),
+                body: "Hello".into(),
+            },
+            Send::Reply {
+                conversation_id: "5".into(),
+                body: "x".repeat(MAX_BODY + 1),
+            },
+            Send::ToTeachers {
+                course_id: "10".into(),
+                subject: " ".into(),
+                body: "Hello".into(),
+            },
+            Send::ToTeachers {
+                course_id: "10".into(),
+                subject: "x".repeat(MAX_SUBJECT + 1),
+                body: "Hello".into(),
+            },
+            Send::ToTeachers {
+                course_id: "10~".into(),
+                subject: "Q".into(),
+                body: "Hello".into(),
+            },
+        ];
+        for case in &cases[..cases.len() - 1] {
+            assert!(case.problem().is_some(), "{case:?}");
+            let t = FakeTransport::new(vec![]);
+            assert!(send(&client(t.clone()), case).await.is_err());
+            assert!(t.requests.lock().unwrap().is_empty(), "{case:?}");
+        }
+        // A shard id is a valid Canvas id, so that one is allowed through.
+        assert!(cases[cases.len() - 1].problem().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_reply_adds_one_message_and_is_confirmed_by_canvas() {
+        let t = FakeTransport::new(vec![json(
+            200,
+            r#"{"id":5,"messages":[{"id":9,"body":"Thanks"}]}"#,
+        )]);
+        let message = Send::Reply {
+            conversation_id: "5".into(),
+            body: "Thanks".into(),
+        };
+        assert_eq!(
+            send(&client(t.clone()), &message).await.unwrap(),
+            "Reply sent."
+        );
+        {
+            let requests = t.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].method, crate::transport::Method::Post);
+            assert!(requests[0].url.ends_with("/conversations/5/add_message"));
+            let body = String::from_utf8_lossy(requests[0].body.as_ref().unwrap());
+            assert_eq!(body, "body=Thanks");
+            // No workflow_state, and nothing that would mark anything read.
+            assert!(!body.contains("workflow_state"), "{body}");
+        }
+
+        // A conversation Canvas does not confirm is reported, not assumed.
+        for reply in [
+            r#"{"id":6,"messages":[{"id":9}]}"#,
+            r#"{"id":5,"messages":[]}"#,
+        ] {
+            let t = FakeTransport::new(vec![json(200, reply)]);
+            assert!(send(&client(t), &message).await.is_err(), "{reply}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_new_message_goes_to_one_course_s_teachers() {
+        let t = FakeTransport::new(vec![json(
+            200,
+            r#"[{"id":11,"subject":"Lab 3"},{"id":12,"subject":"Lab 3"}]"#,
+        )]);
+        let message = Send::ToTeachers {
+            course_id: "10".into(),
+            subject: "Lab 3".into(),
+            body: "A question about part b.".into(),
+        };
+        assert_eq!(
+            send(&client(t.clone()), &message).await.unwrap(),
+            "Message sent to 2 teachers."
+        );
+        {
+            let requests = t.requests.lock().unwrap();
+            assert!(requests[0].url.ends_with("/api/v1/conversations"));
+            let body = String::from_utf8_lossy(requests[0].body.as_ref().unwrap());
+            assert!(
+                body.contains("recipients%5B%5D=course_10_teachers"),
+                "{body}"
+            );
+            assert!(body.contains("context_code=course_10"), "{body}");
+            assert!(body.contains("subject=Lab+3"), "{body}");
+            assert!(body.contains("mode=sync"), "{body}");
+        }
+        // Canvas answering with nothing created is a failure, not a success.
+        let t = FakeTransport::new(vec![json(200, "[]")]);
+        assert!(send(&client(t), &message).await.is_err());
     }
 
     /// Content-free live validation of the exact Rust reader, using the saved
