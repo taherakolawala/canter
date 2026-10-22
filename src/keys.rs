@@ -37,6 +37,8 @@ pub enum Act {
     DownloadAll,
     ShowFolder,
     Submit,
+    SubmitText,
+    SubmitUrl,
     JumpToLink,
     HideCourse,
     ShowHidden,
@@ -46,12 +48,13 @@ pub enum Act {
     InputCancel,
     InputComplete,
     InputClear,
+    LoadTextFile,
     Confirm,
 }
 
 impl Act {
     #[cfg(test)]
-    pub const ALL: [Act; 32] = [
+    pub const ALL: [Act; 35] = [
         Act::Up,
         Act::Down,
         Act::Left,
@@ -74,6 +77,8 @@ impl Act {
         Act::DownloadAll,
         Act::ShowFolder,
         Act::Submit,
+        Act::SubmitText,
+        Act::SubmitUrl,
         Act::JumpToLink,
         Act::HideCourse,
         Act::ShowHidden,
@@ -83,6 +88,7 @@ impl Act {
         Act::InputCancel,
         Act::InputComplete,
         Act::InputClear,
+        Act::LoadTextFile,
         Act::Confirm,
     ];
 }
@@ -122,6 +128,8 @@ pub enum Scope {
     Filter,
     /// Typing a file path to submit.
     PathInput,
+    /// Typing the text or the web address to submit.
+    TextInput,
     /// Confirming a submission.
     Review,
     Menu,
@@ -433,6 +441,14 @@ pub static BINDINGS: &[Binding] = &[
         .title("Submit files")
         .menu('s', Group::Here)
         .hint(4),
+    b(Act::SubmitText, &[ch('t')], &[Assignment], "text")
+        .title("Submit typed text")
+        .menu('t', Group::Here)
+        .hint(5),
+    b(Act::SubmitUrl, &[ch('u')], &[Assignment], "URL")
+        .title("Submit a website URL")
+        .menu('u', Group::Here)
+        .hint(5),
     // Courses.
     b(Act::HideCourse, &[], &[Courses], "hide")
         .title("Hide or restore this course")
@@ -474,14 +490,31 @@ pub static BINDINGS: &[Binding] = &[
     b(Act::InputCancel, &[ESC], &[PathInput], "cancel")
         .title("Cancel submitting")
         .hint(5),
+    b(Act::InputDone, &[ENTER], &[TextInput], "review")
+        .title("Review what will be sent")
+        .hint(1),
+    b(
+        Act::LoadTextFile,
+        &[Key::Ctrl('o')],
+        &[TextInput],
+        "from a file",
+    )
+    .title("Read the text from a file instead")
+    .hint(3),
+    b(Act::InputClear, &[Key::Ctrl('u')], &[TextInput], "clear")
+        .title("Clear what is typed")
+        .hint(4),
+    b(Act::InputCancel, &[ESC], &[TextInput], "cancel")
+        .title("Cancel submitting")
+        .hint(5),
     b(Act::InputCancel, &[ESC], &[MenuSearch], "stop searching")
         .title("Stop searching")
         .hint(2),
     b(Act::Confirm, &[ch('y')], &[Review], "submit now")
         .title("Submit to Canvas")
         .hint(1),
-    b(Act::InputCancel, &[ESC, ch('n')], &[Review], "edit files")
-        .title("Go back and edit the files")
+    b(Act::InputCancel, &[ESC, ch('n')], &[Review], "edit")
+        .title("Go back and edit what will be sent")
         .hint(2)
         .shown("n/Esc"),
 ];
@@ -508,7 +541,7 @@ pub const CORE: &[(Key, Act)] = &[
 pub fn typing(scopes: &[Scope]) -> bool {
     scopes
         .iter()
-        .any(|s| matches!(s, Filter | PathInput | MenuSearch))
+        .any(|s| matches!(s, Filter | PathInput | TextInput | MenuSearch))
 }
 
 pub fn key_of(event: &KeyEvent) -> Key {
@@ -675,6 +708,7 @@ mod tests {
         out.extend([
             vec![Filter],
             vec![PathInput],
+            vec![TextInput],
             vec![Review],
             vec![Menu],
             vec![MenuSearch],

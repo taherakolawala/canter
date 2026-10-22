@@ -16,7 +16,7 @@ use crate::keys::{self, Act, Scope};
 use crate::library::{self, Library, LocalState};
 use crate::model::{AssignmentDetail, AssignmentSummary, CanvasFile, CanvasFolder, Course};
 use crate::modules::ItemKind;
-use crate::submission::{self, FileChoice};
+use crate::submission::{self, DraftKind, FileChoice};
 
 /// An in-flight read that started at most this long before an access may
 /// satisfy that access (approved freshness rule). Older ones may not.
@@ -290,6 +290,13 @@ pub enum Effect {
         assignment_id: String,
         files: Vec<FileChoice>,
     },
+    /// Hand in typed text or a website address, after the review screen.
+    SubmitContent {
+        course_id: String,
+        assignment_id: String,
+        kind: DraftKind,
+        content: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -300,6 +307,14 @@ pub struct SubmissionDraft {
     pub files: Vec<FileChoice>,
     pub reviewing: bool,
     pub busy: bool,
+    /// What this draft hands in. Files, text and a URL share this screen.
+    pub kind: DraftKind,
+    /// The text or address that will be sent, exactly as reviewed.
+    pub content: String,
+    /// The path box is open to read the text from a file.
+    pub from_file: bool,
+    /// Where the text was read from, when it came from a file.
+    pub source: Option<PathBuf>,
 }
 
 /// What has focus on an assignment or announcement page.
@@ -2142,7 +2157,7 @@ impl App {
         (queued, running)
     }
 
-    fn start_submission(&mut self, course: &str, assignment: &str) -> Vec<Effect> {
+    fn start_submission(&mut self, course: &str, assignment: &str, kind: DraftKind) -> Vec<Effect> {
         let Some(resource) = self
             .details
             .get(&(course.to_string(), assignment.to_string()))
@@ -2171,20 +2186,30 @@ impl App {
         let Some(detail) = &resource.data else {
             return vec![];
         };
-        if let Err(reason) = submission::eligible(detail, Utc::now()) {
+        if let Err(reason) = submission::eligible_for(detail, Utc::now(), kind) {
             self.notice = Some(reason);
             return vec![];
         }
         let start_directory = submission::starting_directory();
         let mut suggestions = submission::PathSuggestions::default();
-        suggestions.update(&start_directory);
+        // The path box starts in the user's folder; the text box starts empty.
+        let input = if kind == DraftKind::Files {
+            suggestions.update(&start_directory);
+            start_directory.clone()
+        } else {
+            String::new()
+        };
         self.submission = Some(SubmissionDraft {
-            input: start_directory.clone(),
+            input,
             start_directory,
             suggestions,
             files: Vec::new(),
             reviewing: false,
             busy: false,
+            kind,
+            content: String::new(),
+            from_file: false,
+            source: None,
         });
         vec![]
     }
@@ -2217,8 +2242,10 @@ impl App {
                 vec![]
             } else if draft.reviewing {
                 vec![Scope::Review]
-            } else {
+            } else if draft.kind == DraftKind::Files || draft.from_file {
                 vec![Scope::PathInput]
+            } else {
+                vec![Scope::TextInput]
             };
         }
         let view = self.view();
@@ -2496,18 +2523,9 @@ impl App {
                     .any(|l| matches!(l.target, Target::File { .. })),
             },
             Act::ShowFolder | Act::OpenLibrary => self.library.is_some(),
-            Act::Submit => match &self.view().kind {
-                ViewKind::Detail {
-                    course_id,
-                    assignment_id,
-                    ..
-                } => self
-                    .details
-                    .get(&(course_id.clone(), assignment_id.clone()))
-                    .and_then(|r| r.data.as_ref())
-                    .is_some_and(|d| d.base.submission_types.iter().any(|t| t == "online_upload")),
-                _ => false,
-            },
+            Act::Submit => self.accepts(DraftKind::Files),
+            Act::SubmitText => self.accepts(DraftKind::Text),
+            Act::SubmitUrl => self.accepts(DraftKind::Url),
             Act::NextSection | Act::PrevSection => match self.view().kind.tab() {
                 Some((_, course_id, _)) => self.course_tabs(course_id).len() > 1,
                 None => self.sections().len() > 1,
@@ -2515,6 +2533,27 @@ impl App {
             Act::HideCourse => !self.visible_rows().is_empty(),
             Act::Search => self.is_list(),
             _ => true,
+        }
+    }
+
+    /// Whether this assignment lists a submission type the reader can send.
+    fn accepts(&self, kind: DraftKind) -> bool {
+        match &self.view().kind {
+            ViewKind::Detail {
+                course_id,
+                assignment_id,
+                ..
+            } => self
+                .details
+                .get(&(course_id.clone(), assignment_id.clone()))
+                .and_then(|r| r.data.as_ref())
+                .is_some_and(|d| {
+                    d.base
+                        .submission_types
+                        .iter()
+                        .any(|t| t == kind.canvas_type())
+                }),
+            _ => false,
         }
     }
 
@@ -2689,17 +2728,25 @@ impl App {
             return;
         }
         if let Some(draft) = &mut self.submission {
+            let typing_text = draft.kind != DraftKind::Files && !draft.from_file;
+            let limit = match (typing_text, draft.kind) {
+                (true, DraftKind::Text) => submission::MAX_TEXT,
+                (true, DraftKind::Url) => submission::MAX_URL,
+                _ => 1024,
+            };
             // A held Backspace would wipe the path; one character per press.
-            if erase && key.kind != KeyEventKind::Repeat {
+            if erase && (typing_text || key.kind != KeyEventKind::Repeat) {
                 draft.input.pop();
             } else if let Some(c) = typed
-                && draft.input.chars().count() < 1024
+                && draft.input.chars().count() < limit
             {
                 draft.input.push(c);
             } else {
                 return;
             }
-            draft.suggestions.update(&draft.input);
+            if !typing_text {
+                draft.suggestions.update(&draft.input);
+            }
             return;
         }
         let view = self.view_mut();
@@ -2789,14 +2836,21 @@ impl App {
             Act::Download => self.download_selected(),
             Act::DownloadAll => self.download_everything(),
             Act::ShowFolder => self.show_folder(),
-            Act::Submit => match self.view().kind.clone() {
-                ViewKind::Detail {
-                    course_id,
-                    assignment_id,
-                    ..
-                } => self.start_submission(&course_id, &assignment_id),
-                _ => vec![],
-            },
+            Act::Submit | Act::SubmitText | Act::SubmitUrl => {
+                let kind = match act {
+                    Act::SubmitText => DraftKind::Text,
+                    Act::SubmitUrl => DraftKind::Url,
+                    _ => DraftKind::Files,
+                };
+                match self.view().kind.clone() {
+                    ViewKind::Detail {
+                        course_id,
+                        assignment_id,
+                        ..
+                    } => self.start_submission(&course_id, &assignment_id, kind),
+                    _ => vec![],
+                }
+            }
             Act::JumpToLink => {
                 if let KeyCode::Char(c) = key.code
                     && let Some(n) = c.to_digit(10)
@@ -2828,6 +2882,7 @@ impl App {
             | Act::InputCancel
             | Act::InputComplete
             | Act::InputClear
+            | Act::LoadTextFile
             | Act::Confirm => vec![],
         }
     }
@@ -2916,10 +2971,18 @@ impl App {
                     } = &kind
                     {
                         draft.busy = true;
-                        return vec![Effect::Submit {
-                            course_id: course_id.clone(),
-                            assignment_id: assignment_id.clone(),
-                            files: draft.files.clone(),
+                        return vec![match draft.kind {
+                            DraftKind::Files => Effect::Submit {
+                                course_id: course_id.clone(),
+                                assignment_id: assignment_id.clone(),
+                                files: draft.files.clone(),
+                            },
+                            kind => Effect::SubmitContent {
+                                course_id: course_id.clone(),
+                                assignment_id: assignment_id.clone(),
+                                kind,
+                                content: draft.content.clone(),
+                            },
                         }];
                     }
                 }
@@ -2927,7 +2990,39 @@ impl App {
             }
             return vec![];
         }
+        if draft.kind != DraftKind::Files && !draft.from_file {
+            match act {
+                Act::InputCancel => self.submission = None,
+                Act::InputClear => draft.input.clear(),
+                Act::LoadTextFile if draft.kind == DraftKind::Text => {
+                    draft.from_file = true;
+                    draft.input = draft.start_directory.clone();
+                    draft.suggestions.update(&draft.input);
+                }
+                Act::InputDone => {
+                    let chosen = match draft.kind {
+                        DraftKind::Url => submission::choose_url(&draft.input),
+                        _ => submission::choose_text(&draft.input),
+                    };
+                    match chosen {
+                        Ok(content) => {
+                            draft.content = content;
+                            draft.source = None;
+                            draft.reviewing = true;
+                        }
+                        Err(reason) => self.notice = Some(reason),
+                    }
+                }
+                _ => {}
+            }
+            return vec![];
+        }
         match act {
+            Act::InputCancel if draft.from_file => {
+                // Back to typing rather than out of the draft.
+                draft.from_file = false;
+                draft.input = draft.content.clone();
+            }
             Act::InputCancel => self.submission = None,
             Act::InputClear => {
                 draft.input.clear();
@@ -2941,6 +3036,15 @@ impl App {
                     draft.suggestions.update(&draft.input);
                 }
             }
+            Act::InputDone if draft.from_file => match submission::read_text_file(&draft.input) {
+                Ok((text, path)) => {
+                    draft.content = text;
+                    draft.source = Some(path);
+                    draft.from_file = false;
+                    draft.reviewing = true;
+                }
+                Err(reason) => self.notice = Some(reason),
+            },
             Act::InputDone => {
                 if draft.input.trim().is_empty() || draft.input == draft.start_directory {
                     if draft.files.is_empty() {
@@ -5814,5 +5918,138 @@ mod tests {
         assert!(app.update(key(KeyCode::Enter)).is_empty());
         assert!(app.notice.take().unwrap().contains("Press o"));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An assignment that takes one submission kind, ready to submit.
+    fn submit_app(submission_type: &str) -> App {
+        let mut app = App::new(ORIGIN, None);
+        app.stack.push(View::new(ViewKind::Detail {
+            course_id: "10".into(),
+            course_name: "GPU".into(),
+            assignment_id: "20".into(),
+            title: "Lab".into(),
+        }));
+        let mut detail = AssignmentDetail::default();
+        detail.base.id = "20".into();
+        detail.base.submission_types = vec![submission_type.into()];
+        let resource = app.details.entry(("10".into(), "20".into())).or_default();
+        resource.data = Some(detail);
+        resource.origin = Origin::Network;
+        resource.fetched_at = Some(Utc::now());
+        app
+    }
+
+    #[test]
+    fn text_submission_reviews_the_exact_text_and_needs_an_explicit_yes() {
+        let mut app = submit_app("online_text_entry");
+        // `s` is for files, which this assignment does not take.
+        assert!(!app.available(Act::Submit));
+        assert!(app.available(Act::SubmitText));
+        assert!(!app.available(Act::SubmitUrl));
+        assert!(app.update(key(KeyCode::Char('s'))).is_empty());
+        assert!(app.submission.is_none());
+        assert!(app.notice.take().unwrap().contains("file uploads"));
+        // `t` opens the text box, not the path box.
+        assert!(app.update(key(KeyCode::Char('t'))).is_empty());
+        assert_eq!(app.screen_scopes(), vec![Scope::TextInput]);
+        let draft = app.submission.as_ref().unwrap();
+        assert_eq!(draft.kind, DraftKind::Text);
+        assert!(draft.input.is_empty(), "the text box starts empty");
+        // Letters are text here, including keys that are commands elsewhere.
+        app.update(Msg::Paste("My answer".into()));
+        app.update(key(KeyCode::Char('.')));
+        assert_eq!(app.submission.as_ref().unwrap().input, "My answer.");
+        // Enter reviews; nothing is sent yet.
+        assert!(app.update(key(KeyCode::Enter)).is_empty());
+        let draft = app.submission.as_ref().unwrap();
+        assert!(draft.reviewing);
+        assert_eq!(draft.content, "My answer.", "exactly what will be sent");
+        assert_eq!(app.screen_scopes(), vec![Scope::Review]);
+        // n goes back to editing, with the text kept.
+        app.update(key(KeyCode::Char('n')));
+        assert!(!app.submission.as_ref().unwrap().reviewing);
+        assert_eq!(app.submission.as_ref().unwrap().input, "My answer.");
+        app.update(key(KeyCode::Enter));
+        // Only `y` sends it, and only once.
+        let effects = app.update(key(KeyCode::Char('y')));
+        assert!(
+            matches!(&effects[..], [Effect::SubmitContent { course_id, assignment_id, kind, content }]
+                if course_id == "10" && assignment_id == "20" && *kind == DraftKind::Text && content == "My answer."),
+            "{effects:?}"
+        );
+        assert!(app.update(key(KeyCode::Char('y'))).is_empty());
+        // Canvas's answer closes the draft and re-reads the assignment.
+        let effects = app.update(Msg::Submitted {
+            course_id: "10".into(),
+            assignment_id: "20".into(),
+            result: Ok("Submitted and verified your text on Canvas.".into()),
+        });
+        assert!(app.submission.is_none());
+        assert!(app.notice.as_deref().unwrap().contains("verified"));
+        assert!(fetches(&effects).contains(&ResourceKey::Detail("10".into(), "20".into())));
+    }
+
+    #[test]
+    fn typed_text_can_come_from_a_file_and_an_empty_entry_is_refused() {
+        let dir = std::env::temp_dir().join(format!("tuicanvas-app-text-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let answer = dir.join("answer.txt");
+        std::fs::write(&answer, "Line one.\nLine two.\n").unwrap();
+        let mut app = submit_app("online_text_entry");
+        app.update(key(KeyCode::Char('t')));
+        // An empty box cannot be reviewed.
+        assert!(app.update(key(KeyCode::Enter)).is_empty());
+        assert!(!app.submission.as_ref().unwrap().reviewing);
+        assert!(app.notice.take().unwrap().contains("Type the text"));
+        // Ctrl+O switches to naming a file, using the path box of the upload flow.
+        app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.screen_scopes(), vec![Scope::PathInput]);
+        app.submission.as_mut().unwrap().input = answer.to_string_lossy().into_owned();
+        assert!(app.update(key(KeyCode::Enter)).is_empty());
+        let draft = app.submission.as_ref().unwrap();
+        assert!(draft.reviewing);
+        assert_eq!(draft.content, "Line one.\nLine two.");
+        assert!(draft.source.as_deref().unwrap().ends_with("answer.txt"));
+        let effects = app.update(key(KeyCode::Char('y')));
+        assert!(
+            matches!(&effects[..], [Effect::SubmitContent { content, .. }]
+            if content == "Line one.\nLine two.")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn url_submission_shows_the_address_it_will_send() {
+        let mut app = submit_app("online_url");
+        assert!(app.available(Act::SubmitUrl));
+        assert!(!app.available(Act::SubmitText));
+        app.update(key(KeyCode::Char('u')));
+        assert_eq!(app.submission.as_ref().unwrap().kind, DraftKind::Url);
+        app.update(Msg::Paste("example.com/work".into()));
+        app.update(key(KeyCode::Enter));
+        let draft = app.submission.as_ref().unwrap();
+        assert!(draft.reviewing);
+        assert_eq!(
+            draft.content, "https://example.com/work",
+            "the review screen shows the address with the scheme Canvas needs"
+        );
+        let effects = app.update(key(KeyCode::Char('y')));
+        assert!(
+            matches!(&effects[..], [Effect::SubmitContent { kind, content, .. }]
+            if *kind == DraftKind::Url && content == "https://example.com/work")
+        );
+        // An address that cannot be sent keeps the draft open.
+        let mut app = submit_app("online_url");
+        app.update(key(KeyCode::Char('u')));
+        app.update(Msg::Paste("not a url".into()));
+        app.update(key(KeyCode::Enter));
+        assert!(!app.submission.as_ref().unwrap().reviewing);
+        assert!(app.notice.take().unwrap().contains("spaces"));
+        // Esc leaves without sending anything.
+        app.update(key(KeyCode::Esc));
+        assert!(app.submission.is_none());
     }
 }

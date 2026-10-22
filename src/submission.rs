@@ -428,14 +428,134 @@ pub fn choose_file(
     })
 }
 
-pub fn eligible(assignment: &AssignmentDetail, now: DateTime<Utc>) -> Result<(), String> {
+/// What a draft hands in. Every kind goes through the same review screen and
+/// the same explicit confirmation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DraftKind {
+    #[default]
+    Files,
+    Text,
+    Url,
+}
+
+impl DraftKind {
+    /// The Canvas submission type this kind sends.
+    pub fn canvas_type(self) -> &'static str {
+        match self {
+            DraftKind::Files => "online_upload",
+            DraftKind::Text => "online_text_entry",
+            DraftKind::Url => "online_url",
+        }
+    }
+
+    pub fn noun(self) -> &'static str {
+        match self {
+            DraftKind::Files => "file submission",
+            DraftKind::Text => "text submission",
+            DraftKind::Url => "website URL submission",
+        }
+    }
+}
+
+/// Longest text entry the reader will send. Canvas accepts more; this keeps a
+/// mistyped path or a pasted binary from becoming a submission.
+pub const MAX_TEXT: usize = 100_000;
+/// Longest website address the reader will send.
+pub const MAX_URL: usize = 2_000;
+
+/// The text as it will be sent: the user's words, with nothing added and only
+/// trailing blank space removed.
+pub fn choose_text(input: &str) -> Result<String, String> {
+    let text = input.trim_end();
+    if text.trim().is_empty() {
+        return Err("Type the text to submit first.".into());
+    }
+    if text.chars().count() > MAX_TEXT {
+        return Err(format!("The text is longer than {MAX_TEXT} characters."));
+    }
+    Ok(text.to_string())
+}
+
+/// Read the text of a submission from a file the user named.
+pub fn read_text_file(input: &str) -> Result<(String, PathBuf), String> {
+    let raw = input.trim().trim_matches('"');
+    if raw.is_empty() {
+        return Err("Enter a file path.".into());
+    }
+    let path = std::fs::canonicalize(raw).map_err(|_| "File not found.".to_string())?;
+    let meta = std::fs::metadata(&path).map_err(|_| "Could not read file metadata.".to_string())?;
+    if !meta.is_file() {
+        return Err("Select a file, not a folder.".into());
+    }
+    if meta.len() == 0 {
+        return Err("The file is empty.".into());
+    }
+    if meta.len() as usize > MAX_TEXT {
+        return Err(format!("The file is larger than {MAX_TEXT} bytes."));
+    }
+    let bytes = std::fs::read(&path).map_err(|_| "Could not read the file.".to_string())?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        "The file is not UTF-8 text. Submit it as a file upload instead.".to_string()
+    })?;
+    let text = choose_text(&text)?;
+    Ok((text, path))
+}
+
+/// The address as it will be sent. A bare address gets `https://`, and the
+/// review screen shows the result, so what is confirmed is what is sent.
+pub fn choose_url(input: &str) -> Result<String, String> {
+    let raw = input.trim().trim_matches('"');
+    if raw.is_empty() {
+        return Err("Enter a website address.".into());
+    }
+    if raw.chars().any(char::is_whitespace) {
+        return Err("A web address cannot contain spaces.".into());
+    }
+    if raw.chars().any(|c| c.is_control()) {
+        return Err("That address contains characters Canvas cannot accept.".into());
+    }
+    let url = match raw.split_once("://") {
+        Some(("http" | "https", _)) => raw.to_string(),
+        Some((scheme, _)) => {
+            return Err(format!(
+                "Only http and https addresses can be sent, not {scheme}."
+            ));
+        }
+        None if raw.contains(':') => {
+            return Err("Start the address with https://".into());
+        }
+        None => format!("https://{raw}"),
+    };
+    let host = url
+        .split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(""))
+        .unwrap_or("");
+    if host.is_empty() || !host.contains('.') || host.starts_with('.') || host.ends_with('.') {
+        return Err("That does not look like a web address.".into());
+    }
+    if url.chars().count() > MAX_URL {
+        return Err(format!("The address is longer than {MAX_URL} characters."));
+    }
+    Ok(url)
+}
+
+/// Whether this assignment will take a submission of this kind now.
+pub fn eligible_for(
+    assignment: &AssignmentDetail,
+    now: DateTime<Utc>,
+    kind: DraftKind,
+) -> Result<(), String> {
     if !assignment
         .base
         .submission_types
         .iter()
-        .any(|t| t == "online_upload")
+        .any(|t| t == kind.canvas_type())
     {
-        return Err("This assignment does not accept file uploads.".into());
+        return Err(match kind {
+            DraftKind::Files => "This assignment does not accept file uploads.".into(),
+            DraftKind::Text => "This assignment does not accept typed text.".into(),
+            DraftKind::Url => "This assignment does not accept a website URL.".into(),
+        });
     }
     if assignment.base.locked_for_user == Some(true)
         || assignment.base.unlock_at.is_some_and(|t| t > now)
@@ -564,9 +684,100 @@ pub async fn submit(
     ))
 }
 
+/// Hand in typed text or a website address. The content is exactly what the
+/// review screen showed; nothing is added here.
+pub async fn submit_content(
+    client: &CanvasClient,
+    course: &str,
+    assignment: &str,
+    kind: DraftKind,
+    content: &str,
+) -> Result<String, String> {
+    if !valid_id(course) || !valid_id(assignment) || content.is_empty() {
+        return Err("Invalid submission request.".into());
+    }
+    let field = match kind {
+        DraftKind::Text => "submission[body]",
+        DraftKind::Url => "submission[url]",
+        DraftKind::Files => return Err("Files are submitted through the upload flow.".into()),
+    };
+    let endpoint = format!("/api/v1/courses/{course}/assignments/{assignment}/submissions");
+    let response: Value = client
+        .post_form(
+            &endpoint,
+            &[
+                ("submission[submission_type]", kind.canvas_type()),
+                (field, content),
+            ],
+        )
+        .await
+        .map_err(|e| {
+            format!(
+                "Submission may not have completed: {}. Refresh before trying again.",
+                e.describe()
+            )
+        })?;
+    if response
+        .get("submitted_at")
+        .and_then(Value::as_str)
+        .is_none()
+    {
+        return Err(
+            "Canvas did not confirm a submission time. Refresh before trying again.".into(),
+        );
+    }
+    let check: Value = client
+        .get_json(&format!("{endpoint}/self?include[]=submission_history"))
+        .await
+        .map(|(v, _)| v)
+        .map_err(|e| {
+            format!(
+                "Canvas accepted the submission, but verification failed: {}. Refresh to check it.",
+                e.describe()
+            )
+        })?;
+    if check.get("submission_type").and_then(Value::as_str) != Some(kind.canvas_type()) {
+        return Err(
+            "Canvas accepted the submission, but recorded it as another type. Refresh to check it."
+                .into(),
+        );
+    }
+    match kind {
+        DraftKind::Text => {
+            // Canvas sanitises the HTML it stores, so the text is checked for
+            // presence rather than for an exact match.
+            if check
+                .get("body")
+                .and_then(Value::as_str)
+                .is_none_or(|b| b.trim().is_empty())
+            {
+                return Err(
+                    "Canvas accepted the submission, but recorded no text. Refresh to check it."
+                        .into(),
+                );
+            }
+            Ok("Submitted and verified your text on Canvas.".into())
+        }
+        DraftKind::Url => match check.get("url").and_then(Value::as_str) {
+            Some(recorded) if recorded == content => {
+                Ok("Submitted and verified the address on Canvas.".into())
+            }
+            Some(recorded) => Ok(format!(
+                "Submitted. Canvas recorded the address as {recorded}."
+            )),
+            None => Err(
+                "Canvas accepted the submission, but recorded no address. Refresh to check it."
+                    .into(),
+            ),
+        },
+        DraftKind::Files => unreachable!("rejected above"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canvas::tests::{FakeTransport, client, json};
     use crate::model::{AssignmentSummary, Submission};
 
     fn assignment() -> AssignmentDetail {
@@ -705,6 +916,148 @@ mod tests {
     }
 
     #[test]
+    fn text_and_url_entries_are_checked_before_review() {
+        assert_eq!(choose_text("  hello \n").unwrap(), "  hello");
+        assert!(choose_text("   ").unwrap_err().contains("Type the text"));
+        assert!(
+            choose_text(&"x".repeat(MAX_TEXT + 1))
+                .unwrap_err()
+                .contains("longer than")
+        );
+        assert_eq!(
+            choose_url("example.com/work").unwrap(),
+            "https://example.com/work"
+        );
+        assert_eq!(
+            choose_url(" \"http://a.example.com\" ").unwrap(),
+            "http://a.example.com"
+        );
+        assert!(choose_url("ftp://a.com").unwrap_err().contains("Only http"));
+        assert!(choose_url("file:/x").unwrap_err().contains("https://"));
+        assert!(choose_url("localhost").unwrap_err().contains("web address"));
+        assert!(choose_url("a b.com").unwrap_err().contains("spaces"));
+        assert!(choose_url("").unwrap_err().contains("Enter a website"));
+    }
+
+    #[test]
+    fn text_read_from_a_file_must_be_utf8_and_not_empty() {
+        let dir = std::env::temp_dir().join(format!("tuicanvas-text-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let good = dir.join("answer.txt");
+        let empty = dir.join("empty.txt");
+        let binary = dir.join("blob.bin");
+        std::fs::write(&good, "My answer.\n").unwrap();
+        std::fs::write(&empty, b"").unwrap();
+        std::fs::write(&binary, [0xff, 0xfe, 0x00, 0x41]).unwrap();
+        let (text, path) = read_text_file(&good.to_string_lossy()).unwrap();
+        assert_eq!(text, "My answer.");
+        assert!(path.ends_with("answer.txt"));
+        assert!(
+            read_text_file(&empty.to_string_lossy())
+                .unwrap_err()
+                .contains("empty")
+        );
+        assert!(
+            read_text_file(&binary.to_string_lossy())
+                .unwrap_err()
+                .contains("UTF-8")
+        );
+        assert!(
+            read_text_file(&dir.to_string_lossy())
+                .unwrap_err()
+                .contains("folder")
+        );
+        assert!(read_text_file("  ").unwrap_err().contains("Enter a file"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn eligibility_is_checked_per_submission_type() {
+        let now = Utc::now();
+        let mut a = assignment();
+        a.base.submission_types = vec!["online_text_entry".into()];
+        assert!(eligible_for(&a, now, DraftKind::Text).is_ok());
+        assert!(
+            eligible_for(&a, now, DraftKind::Url)
+                .unwrap_err()
+                .contains("website URL")
+        );
+        assert!(
+            eligible_for(&a, now, DraftKind::Files)
+                .unwrap_err()
+                .contains("file uploads")
+        );
+        a.base.submission_types = vec!["online_url".into()];
+        assert!(eligible_for(&a, now, DraftKind::Url).is_ok());
+        // Locks and the attempt limit apply to every kind.
+        a.base.locked_for_user = Some(true);
+        assert!(
+            eligible_for(&a, now, DraftKind::Url)
+                .unwrap_err()
+                .contains("locked")
+        );
+    }
+
+    #[tokio::test]
+    async fn text_submission_sends_the_reviewed_body_and_verifies_it() {
+        let t = FakeTransport::new(vec![
+            json(
+                200,
+                r#"{"id":1,"submitted_at":"2026-10-22T12:00:00Z","submission_type":"online_text_entry"}"#,
+            ),
+            json(
+                200,
+                r#"{"submitted_at":"2026-10-22T12:00:00Z","submission_type":"online_text_entry","body":"<p>My answer</p>"}"#,
+            ),
+        ]);
+        let c = client(t.clone());
+        let message = submit_content(&c, "10", "20", DraftKind::Text, "My answer")
+            .await
+            .unwrap();
+        assert!(message.contains("verified"), "{message}");
+        let requests = t.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2, "one write and one verifying read");
+        let body = String::from_utf8(requests[0].body.clone().unwrap()).unwrap();
+        assert!(
+            body.contains("submission%5Bsubmission_type%5D=online_text_entry")
+                && body.contains("submission%5Bbody%5D=My+answer"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn url_submission_reports_what_canvas_recorded() {
+        let t = FakeTransport::new(vec![
+            json(200, r#"{"submitted_at":"2026-10-22T12:00:00Z"}"#),
+            json(
+                200,
+                r#"{"submission_type":"online_url","url":"https://example.com/work/"}"#,
+            ),
+        ]);
+        let c = client(t.clone());
+        let message = submit_content(&c, "10", "20", DraftKind::Url, "https://example.com/work")
+            .await
+            .unwrap();
+        assert!(message.contains("https://example.com/work/"), "{message}");
+        // A submission Canvas does not confirm is reported as a failure.
+        let t = FakeTransport::new(vec![json(200, r#"{"id":1}"#)]);
+        assert!(
+            submit_content(&client(t), "10", "20", DraftKind::Url, "https://x.example")
+                .await
+                .unwrap_err()
+                .contains("did not confirm")
+        );
+        // Invalid ids never reach the network.
+        let t = FakeTransport::new(vec![]);
+        assert!(
+            submit_content(&client(t.clone()), "10/x", "20", DraftKind::Text, "hi")
+                .await
+                .is_err()
+        );
+        assert!(t.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn validates_paths_extensions_and_duplicates_before_upload() {
         let dir =
             std::env::temp_dir().join(format!("tuicanvas-submit-test-{}", std::process::id()));
@@ -738,18 +1091,30 @@ mod tests {
     fn respects_lock_and_attempt_limit() {
         let now = Utc::now();
         let mut a = assignment();
-        assert!(eligible(&a, now).is_ok());
+        assert!(eligible_for(&a, now, DraftKind::Files).is_ok());
         a.base.submission = Some(Submission {
             attempt: Some(2),
             ..Default::default()
         });
-        assert!(eligible(&a, now).unwrap_err().contains("attempt"));
+        assert!(
+            eligible_for(&a, now, DraftKind::Files)
+                .unwrap_err()
+                .contains("attempt")
+        );
         a.base.submission = None;
         a.base.locked_for_user = Some(true);
-        assert!(eligible(&a, now).unwrap_err().contains("locked"));
+        assert!(
+            eligible_for(&a, now, DraftKind::Files)
+                .unwrap_err()
+                .contains("locked")
+        );
         a.base.locked_for_user = None;
         a.base.submission_types = vec!["online_text_entry".into()];
-        assert!(eligible(&a, now).unwrap_err().contains("does not accept"));
+        assert!(
+            eligible_for(&a, now, DraftKind::Files)
+                .unwrap_err()
+                .contains("does not accept")
+        );
     }
 
     #[test]
@@ -761,7 +1126,11 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(prior_attempts(&a), 1);
-        assert!(eligible(&a, Utc::now()).unwrap_err().contains("attempt"));
+        assert!(
+            eligible_for(&a, Utc::now(), DraftKind::Files)
+                .unwrap_err()
+                .contains("attempt")
+        );
     }
 
     #[test]

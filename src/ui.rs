@@ -97,15 +97,15 @@ fn draw_submission(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>)
         .details
         .get(&(course_id.clone(), assignment_id.clone()))
         .and_then(|r| r.data.as_ref());
+    let heading = match (draft.kind, draft.reviewing || draft.busy, draft.from_file) {
+        (_, true, _) => format!("Review {}", draft.kind.noun()),
+        (crate::submission::DraftKind::Files, ..) => "Add files to submit".into(),
+        (crate::submission::DraftKind::Text, _, true) => "Read the text from a file".into(),
+        (crate::submission::DraftKind::Text, ..) => "Type the text to submit".into(),
+        (crate::submission::DraftKind::Url, ..) => "Enter the website address to submit".into(),
+    };
     let mut lines = vec![
-        Line::from(Span::styled(
-            if draft.reviewing || draft.busy {
-                "Review file submission"
-            } else {
-                "Add files to submit"
-            },
-            theme::bold(),
-        )),
+        Line::from(Span::styled(heading, theme::bold())),
         Line::from(format!("Course: {course_name}")),
         Line::from(format!("Assignment: {title}")),
     ];
@@ -162,24 +162,111 @@ fn draw_submission(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>)
             lines.push(Line::from(format!("   {}", file.path.display())));
         }
     }
+    // The review screen shows the exact content that will be sent.
+    if (draft.reviewing || draft.busy) && draft.kind != crate::submission::DraftKind::Files {
+        if let Some(path) = &draft.source {
+            lines.push(Line::from(format!("Read from: {}", path.display())));
+        }
+        lines.push(Line::from(Span::styled(
+            match draft.kind {
+                crate::submission::DraftKind::Url => "This address will be sent:".to_string(),
+                _ => format!(
+                    "These {} characters will be sent, and nothing else:",
+                    draft.content.chars().count()
+                ),
+            },
+            theme::muted(),
+        )));
+        lines.push(Line::from(Span::styled(
+            "─".repeat(usize::from(area.width).min(80)),
+            theme::faint(),
+        )));
+        let room = usize::from(area.height).saturating_sub(lines.len() + 4);
+        let body =
+            crate::submission::wrap(&draft.content, usize::from(area.width).saturating_sub(2));
+        for line in body.iter().take(room) {
+            lines.push(Line::from(Span::styled(line.clone(), theme::code())));
+        }
+        if body.len() > room {
+            lines.push(Line::from(Span::styled(
+                format!("… and {} more lines", body.len() - room),
+                theme::muted(),
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "─".repeat(usize::from(area.width).min(80)),
+            theme::faint(),
+        )));
+    }
     lines.push(Line::from(""));
     if draft.busy {
         lines.push(Line::from(Span::styled(
-            "Uploading and verifying… Please wait.",
+            match draft.kind {
+                crate::submission::DraftKind::Files => "Uploading and verifying… Please wait.",
+                _ => "Sending and verifying… Please wait.",
+            },
             theme::syncing(),
         )));
     } else if draft.reviewing {
         lines.push(Line::from(Span::styled(
-            "Press y to upload and submit these files to Canvas.",
+            match draft.kind {
+                crate::submission::DraftKind::Files => {
+                    "Press y to upload and submit these files to Canvas."
+                }
+                crate::submission::DraftKind::Text => {
+                    "Press y to submit this text to Canvas, exactly as shown."
+                }
+                crate::submission::DraftKind::Url => {
+                    "Press y to submit this address to Canvas, exactly as shown."
+                }
+            },
             theme::alert(),
         )));
+    } else if draft.kind != crate::submission::DraftKind::Files && !draft.from_file {
+        match draft.kind {
+            crate::submission::DraftKind::Url => {
+                lines.push(Line::from(
+                    "Type or paste the address. Enter shows what will be sent.",
+                ));
+                lines.push(Line::from(
+                    "An address without https:// gets it added; review shows the result.",
+                ));
+            }
+            _ => {
+                lines.push(Line::from(
+                    "Type or paste the text. Enter shows what will be sent.",
+                ));
+                lines.push(Line::from(
+                    "Ctrl+O reads the text from a file instead (the way to submit paragraphs).",
+                ));
+            }
+        }
+        lines.push(Line::from("Ctrl+U clears it; Esc cancels."));
+        lines.push(Line::from(""));
+        let typed = crate::submission::wrap(
+            &format!("{}\u{258f}", draft.input),
+            usize::from(area.width).saturating_sub(2),
+        );
+        let room = usize::from(area.height).saturating_sub(lines.len());
+        for line in typed.iter().rev().take(room).rev() {
+            lines.push(Line::from(Span::styled(line.clone(), theme::code())));
+        }
     } else {
-        lines.push(Line::from(
-            "Start in your user folder; type a name or paste a full path. Enter adds it.",
-        ));
-        lines.push(Line::from(
-            "After adding files, Enter at the starting folder opens review. Ctrl+U clears the path.",
-        ));
+        if draft.from_file {
+            lines.push(Line::from(
+                "Start in your user folder; type a name or paste a full path.",
+            ));
+            lines.push(Line::from(
+                "Enter reads the file as UTF-8 text and opens review. Esc goes back to typing.",
+            ));
+        } else {
+            lines.push(Line::from(
+                "Start in your user folder; type a name or paste a full path. Enter adds it.",
+            ));
+            lines.push(Line::from(
+                "After adding files, Enter at the starting folder opens review. Ctrl+U clears the path.",
+            ));
+        }
         lines.push(Line::from(""));
         lines.push(Line::from(format!("Path: {}▏", draft.input)));
         if !draft.suggestions.matches.is_empty() {
@@ -3300,6 +3387,44 @@ mod tests {
             s.contains("d download") && s.contains("D all feedback"),
             "{s}"
         );
+    }
+
+    #[test]
+    fn text_and_url_drafts_show_exactly_what_will_be_sent() {
+        let mut app = graded_assignment(vec!["online_text_entry".into()]);
+        app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('t'),
+            KeyModifiers::NONE,
+        )));
+        let s = screen(&mut app, 100, 20);
+        println!("{s}\n");
+        assert!(s.contains("Type the text to submit"), "{s}");
+        assert!(
+            s.contains("Lab-2 Assignment") && s.contains("Attempt: 3 of"),
+            "{s}"
+        );
+        app.update(Msg::Paste("My answer, with a timings table.".into()));
+        app.update(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        let s = screen(&mut app, 100, 20);
+        println!("{s}\n");
+        assert!(s.contains("Review text submission"), "{s}");
+        assert!(s.contains("32 characters will be sent"), "{s}");
+        assert!(s.contains("My answer, with a timings table."), "{s}");
+        assert!(s.contains("Press y to submit this text"), "{s}");
+        assert!(s.contains("Resubmission"), "{s}");
+
+        let mut app = graded_assignment(vec!["online_url".into()]);
+        app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('u'),
+            KeyModifiers::NONE,
+        )));
+        app.update(Msg::Paste("example.com/report".into()));
+        app.update(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        let s = screen(&mut app, 100, 20);
+        println!("{s}\n");
+        assert!(s.contains("Review website URL submission"), "{s}");
+        assert!(s.contains("https://example.com/report"), "{s}");
+        assert!(s.contains("Press y to submit this address"), "{s}");
     }
 
     #[test]
