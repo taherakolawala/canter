@@ -904,16 +904,32 @@ pub fn dump(config: &Config, out: &Path, course: &str, assignment: &str) -> Resu
             step(&mut app, effects, "4c-page", &mut timings)?;
         }
     }
-    // Grades, where Canvas shows the tab for this course.
-    while app.stack.len() > 2 {
-        app.update(press(KeyCode::Esc));
-    }
-    for _ in 0..5 {
-        if tab_now(&app) == Some(CourseTab::Grades) {
-            break;
+    // Grades and Pages, each only where Canvas shows that tab for this course:
+    // cycling past a tab the course does not have would file another tab's
+    // screen and timing under its name.
+    for (wanted, name) in [
+        (CourseTab::Grades, "4d-grades"),
+        (CourseTab::Pages, "4e-pages"),
+    ] {
+        while app.stack.len() > 2 {
+            app.update(press(KeyCode::Esc));
         }
-        let effects = app.update(press(KeyCode::Tab));
-        step(&mut app, effects, "4d-grades", &mut timings)?;
+        let shown = app
+            .view()
+            .kind
+            .tab()
+            .map(|(_, course_id, _)| course_id.to_string())
+            .is_some_and(|course_id| app.course_tabs(&course_id).contains(&wanted));
+        if !shown {
+            continue;
+        }
+        for _ in 0..8 {
+            if tab_now(&app) == Some(wanted) {
+                break;
+            }
+            let effects = app.update(press(KeyCode::Tab));
+            step(&mut app, effects, name, &mut timings)?;
+        }
     }
     while app.stack.len() > 2 {
         app.update(press(KeyCode::Esc));
