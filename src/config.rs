@@ -3,6 +3,16 @@
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_ORIGIN: &str = "https://ufl.instructure.com";
+pub const DEFAULT_HOST: &str = "ufl.instructure.com";
+
+/// How to sign in: Rust driving a browser with no window, Rust opening a
+/// separate sign-in window the user drives, or the Python helper.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignIn {
+    Background,
+    Window,
+    Python,
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -56,6 +66,22 @@ impl Config {
         self.project_dir.join("benchmarks").join("private")
     }
 
+    /// The browser profile sign-in uses, kept away from the user's own
+    /// browser profile so their sessions and extensions are untouched.
+    pub fn signin_profile_dir(&self) -> PathBuf {
+        self.data_dir.join("signin").join(&self.host)
+    }
+
+    /// Which sign-in path runs when nothing is asked for on the command line.
+    /// `TUICANVAS_SIGNIN` selects one; other Canvas sites get the window,
+    /// because their identity provider is unknown here.
+    pub fn signin_choice(&self) -> SignIn {
+        signin_choice(
+            &std::env::var("TUICANVAS_SIGNIN").unwrap_or_default(),
+            &self.host,
+        )
+    }
+
     pub fn login_helper(&self) -> Option<(PathBuf, PathBuf)> {
         let script = self.project_dir.join("tools").join("terminal_login.py");
         let python = if cfg!(windows) {
@@ -67,6 +93,18 @@ impl Config {
             self.project_dir.join(".venv").join("bin").join("python")
         };
         (script.is_file() && python.is_file()).then_some((python, self.project_dir.clone()))
+    }
+}
+
+fn signin_choice(setting: &str, host: &str) -> SignIn {
+    match setting.to_ascii_lowercase().as_str() {
+        "background" | "headless" => SignIn::Background,
+        "window" | "browser" => SignIn::Window,
+        "python" | "helper" => SignIn::Python,
+        // Only UF's GatorLink and Duo pages are known here; another site's
+        // identity provider has to be driven by its own user.
+        _ if host == DEFAULT_HOST => SignIn::Background,
+        _ => SignIn::Window,
     }
 }
 
@@ -142,5 +180,20 @@ mod tests {
         assert!(parse_origin("https://ufl.instructure.com/api").is_err());
         assert!(parse_origin("https://ufl.instructure.com:8443").is_err());
         assert!(parse_origin("https://user@host.com").is_err());
+    }
+
+    #[test]
+    fn sign_in_choice_follows_the_setting_then_the_site() {
+        assert_eq!(signin_choice("", DEFAULT_HOST), SignIn::Background);
+        assert_eq!(signin_choice("", "canvas.example.edu"), SignIn::Window);
+        assert_eq!(signin_choice("Window", DEFAULT_HOST), SignIn::Window);
+        assert_eq!(
+            signin_choice("python", "canvas.example.edu"),
+            SignIn::Python
+        );
+        assert_eq!(
+            signin_choice("headless", "canvas.example.edu"),
+            SignIn::Background
+        );
     }
 }

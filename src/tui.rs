@@ -391,11 +391,32 @@ pub fn run_login_helper(config: &Config) -> Result<(), String> {
     }
 }
 
+/// Sign in the configured way: TUICanvas driving a browser itself, or the
+/// Python helper when that is asked for.
+pub fn sign_in(
+    config: &Config,
+    choice: crate::config::SignIn,
+    options: crate::signin::Options,
+) -> Result<(), String> {
+    let mode = match choice {
+        crate::config::SignIn::Python => return run_login_helper(config),
+        crate::config::SignIn::Window => crate::browser::Mode::Window,
+        crate::config::SignIn::Background => crate::browser::Mode::Background,
+    };
+    crate::signin::sign_in(config, crate::signin::Options { mode, ..options })
+        .map(|_| ())
+        .map_err(|e| e.message())
+}
+
 fn load_or_login(config: &Config) -> Result<SessionFile, String> {
     match SessionFile::load(&config.session_path(), &config.origin).map_err(|e| e.0)? {
         Some(s) => Ok(s),
         None => {
-            run_login_helper(config)?;
+            sign_in(
+                config,
+                config.signin_choice(),
+                crate::signin::Options::default(),
+            )?;
             SessionFile::load(&config.session_path(), &config.origin)
                 .map_err(|e| e.0)?
                 .ok_or_else(|| "Sign-in did not save a session.".to_string())
@@ -641,7 +662,12 @@ pub fn run(config: &Config, options: Options) -> Result<(), String> {
                 Effect::Login => {
                     input.pause();
                     ratatui::restore();
-                    let outcome = run_login_helper(config).and_then(|_| {
+                    let outcome = sign_in(
+                        config,
+                        config.signin_choice(),
+                        crate::signin::Options::default(),
+                    )
+                    .and_then(|_| {
                         SessionFile::load(&config.session_path(), &config.origin)
                             .map_err(|e| e.0)?
                             .ok_or_else(|| "Sign-in did not save a session.".to_string())
