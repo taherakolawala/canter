@@ -1782,6 +1782,8 @@ struct Anchors {
     link_rows: Vec<usize>,
     submissions: Option<usize>,
     attempt_rows: Vec<usize>,
+    feedback: Option<usize>,
+    feedback_rows: Vec<usize>,
 }
 
 /// `text` cut or padded to exactly `width` columns.
@@ -2017,6 +2019,160 @@ fn submission_rows(
     }
 }
 
+/// The instructor's feedback on the selected attempt: comments with their
+/// author, date and files, then the rubric scores. Comments Canvas keeps only
+/// as a recording or as marks drawn on the submitted file have no text here,
+/// so the row says so and `o` opens the submission in the browser.
+#[allow(clippy::too_many_arguments)]
+fn feedback_rows(
+    app: &App,
+    course_id: &str,
+    assignment_id: &str,
+    focused: bool,
+    attempt: usize,
+    selected: usize,
+    width: usize,
+    now: DateTime<Utc>,
+    rows: &mut Vec<PageRow>,
+    anchors: &mut Anchors,
+) {
+    let comments = app.attempt_comments(course_id, assignment_id, attempt);
+    let rubric = app.rubric_scores(course_id, assignment_id, attempt);
+    if comments.is_empty() && rubric.is_empty() {
+        return;
+    }
+    let indent = "    ";
+    let text_width = width.saturating_sub(indent.len() + 1);
+    rows.push(PageRow::Line(Line::raw("")));
+    anchors.feedback = Some(rows.len());
+    rows.push(PageRow::Line(section_heading(
+        format!("Feedback ({})", comments.len() + rubric.len()),
+        focused,
+        width,
+    )));
+    let mut entry = 0usize;
+    for comment in &comments {
+        let mut parts = vec![html::sanitize(comment.author())];
+        if let Some(at) = comment.created_at {
+            parts.push(short_date(at, now));
+        }
+        let files = comment.files().count();
+        if files > 0 {
+            parts.push(format!("{files} file{}", if files == 1 { "" } else { "s" }));
+        }
+        let mut line = Line::from(Span::raw(pad(&format!(" {}", parts.join(" · ")), width)));
+        if focused && entry == selected {
+            line = line.style(theme::selected());
+        }
+        anchors.feedback_rows.push(rows.len());
+        rows.push(PageRow::Line(line));
+        match comment.browser_only() {
+            Some(reason) => rows.push(PageRow::Line(Line::styled(
+                format!("{indent}{}", reason.describe()),
+                theme::alert(),
+            ))),
+            None => {
+                for text in crate::submission::wrap(comment.text(), text_width) {
+                    rows.push(PageRow::Line(Line::raw(format!("{indent}{text}"))));
+                }
+            }
+        }
+        for file in comment.files() {
+            let size = file
+                .size
+                .map(|n| format!(" ({})", human_size(n)))
+                .unwrap_or_default();
+            let (state, style) = match app.file_meta(&file.id) {
+                Some(meta) => local_text(&app.local_state(meta)),
+                None => (String::new(), theme::faint()),
+            };
+            rows.push(PageRow::Line(Line::from(vec![
+                Span::raw(format!(
+                    "{indent}• {}{size} ",
+                    truncate(
+                        &html::sanitize(file.name()),
+                        width.saturating_sub(size.len() + 24)
+                    )
+                )),
+                Span::styled(state, style),
+            ])));
+        }
+        entry += 1;
+    }
+    // Feedback drawn on a submitted document is only visible in Canvas.
+    let annotated: Vec<String> = app
+        .histories
+        .get(&(course_id.to_string(), assignment_id.to_string()))
+        .and_then(|r| r.data.as_ref())
+        .and_then(|h| h.attempts.get(attempt))
+        .map(|a| {
+            a.attachments
+                .iter()
+                .filter(|f| f.in_document_viewer())
+                .map(|f| html::sanitize(f.name()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !annotated.is_empty() {
+        rows.push(PageRow::Line(Line::styled(
+            format!(
+                " Marks drawn on {} show only in Canvas's document viewer. Press o to open the submission.",
+                annotated.join(", ")
+            ),
+            theme::muted(),
+        )));
+    }
+    if rubric.is_empty() {
+        return;
+    }
+    let detail = app
+        .details
+        .get(&(course_id.to_string(), assignment_id.to_string()))
+        .and_then(|r| r.data.as_ref());
+    let awarded: f64 = rubric.iter().filter_map(|(_, s)| s.points).sum();
+    let possible = detail
+        .and_then(|d| d.rubric_settings.as_ref())
+        .and_then(|r| r.points_possible)
+        .unwrap_or_else(|| detail.map_or(0.0, |d| d.rubric.iter().filter_map(|c| c.points).sum()));
+    let title = detail
+        .and_then(|d| d.rubric_settings.as_ref())
+        .and_then(|r| r.title.as_deref())
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or("Rubric");
+    rows.push(PageRow::Line(Line::styled(
+        format!(
+            " {}: {} of {}",
+            html::sanitize(title),
+            fmt_num(awarded),
+            fmt_num(possible)
+        ),
+        theme::bold(),
+    )));
+    for (criterion, score) in &rubric {
+        let points = format!(
+            "{} / {}",
+            score.points.map(fmt_num).unwrap_or_else(|| "-".into()),
+            criterion.points.map(fmt_num).unwrap_or_else(|| "-".into())
+        );
+        let name_w = width.saturating_sub(points.chars().count() + 2);
+        let mut line = Line::from(Span::raw(format!(
+            " {} {points}",
+            pad(&html::sanitize(criterion.title()), name_w)
+        )));
+        if focused && entry == selected {
+            line = line.style(theme::selected());
+        }
+        anchors.feedback_rows.push(rows.len());
+        rows.push(PageRow::Line(line));
+        if let Some(note) = score.comments.as_deref().filter(|c| !c.trim().is_empty()) {
+            for text in crate::submission::wrap(note, text_width) {
+                rows.push(PageRow::Line(Line::raw(format!("{indent}{text}"))));
+            }
+        }
+        entry += 1;
+    }
+}
+
 fn announcement_header(
     app: &App,
     course_id: &str,
@@ -2228,6 +2384,18 @@ fn draw_page(
             &mut rows,
             &mut anchors,
         );
+        feedback_rows(
+            app,
+            c,
+            a,
+            focus == Section::Feedback,
+            selected_attempt,
+            app.view().feedback,
+            width,
+            now,
+            &mut rows,
+            &mut anchors,
+        );
     }
     // Keep the focused section and its selection in view.
     let height = usize::from(area.height);
@@ -2237,6 +2405,7 @@ fn draw_page(
         let start = match focus {
             Section::Links => anchors.links,
             Section::Submissions => anchors.submissions,
+            Section::Feedback => anchors.feedback,
             Section::Text | Section::Calendar | Section::Day => None,
         };
         if let Some(start) = start {
@@ -2256,6 +2425,14 @@ fn draw_page(
         Section::Submissions => {
             // The selected attempt's details follow its row, so put the row near the top.
             if let Some(&row) = anchors.attempt_rows.get(view.attempt)
+                && (row < view.scroll || row >= view.scroll + height)
+            {
+                view.scroll = row.saturating_sub(1);
+            }
+        }
+        Section::Feedback => {
+            // Each comment's text follows its row, so keep the row near the top.
+            if let Some(&row) = anchors.feedback_rows.get(view.feedback)
                 && (row < view.scroll || row >= view.scroll + height)
             {
                 view.scroll = row.saturating_sub(1);
@@ -3012,6 +3189,117 @@ mod tests {
         assert_eq!(theme::due(hours(48), false, now).fg, Some(theme::AMBER));
         assert_eq!(theme::due(hours(24 * 10), false, now).fg, None);
         assert_eq!(theme::due(hours(-2), true, now).fg, Some(theme::MUTED));
+    }
+
+    /// An assignment page with two attempts, ready for the feedback section.
+    fn graded_assignment(submission_types: Vec<String>) -> App {
+        let now = Utc::now();
+        let mut app = App::new("https://ufl.instructure.com", None);
+        let effects = app.start();
+        deliver(
+            &mut app,
+            effects,
+            Payload::Courses(vec![Course {
+                id: "1".into(),
+                name: Some("GPU Computing".into()),
+                ..Default::default()
+            }]),
+        );
+        let base = AssignmentSummary {
+            id: "7".into(),
+            name: Some("Lab-2 Assignment".into()),
+            due_at: Some(now + chrono::Duration::days(3)),
+            points_possible: Some(10.0),
+            submission_types,
+            submission: Some(Submission {
+                submitted_at: Some(now),
+                attempt: Some(2),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let effects = app.update(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        deliver(&mut app, effects, Payload::Assignments(vec![base.clone()]));
+        let effects = app.update(Msg::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+        let detail = crate::model::AssignmentDetail {
+            base,
+            description: Some("<p>Implement the kernel.</p>".into()),
+            rubric: vec![crate::model::RubricCriterion {
+                id: Some("_1".into()),
+                description: Some("Correctness".into()),
+                points: Some(8.0),
+                ..Default::default()
+            }],
+            rubric_settings: Some(crate::model::RubricSettings {
+                title: Some("Lab rubric".into()),
+                points_possible: Some(8.0),
+            }),
+            ..Default::default()
+        };
+        deliver(&mut app, effects, Payload::Detail(Box::new(detail)));
+        app
+    }
+
+    #[test]
+    fn feedback_section_shows_comments_rubric_and_what_only_canvas_can_show() {
+        let mut app = graded_assignment(vec!["online_upload".into()]);
+        let effects: Vec<_> = app
+            .update(Msg::Key(KeyEvent::new(
+                KeyCode::Char('r'),
+                KeyModifiers::NONE,
+            )))
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    crate::app::Effect::Fetch {
+                        key: ResourceKey::History(..),
+                        ..
+                    }
+                )
+            })
+            .collect();
+        let history = crate::submission::History::parse(serde_json::json!({
+            "attempt": 2, "submitted_at": "2026-10-22T12:00:00Z",
+            "submission_history": [
+                {"attempt": 1, "submitted_at": "2026-10-20T12:00:00Z", "submission_type": "online_upload"},
+                {"attempt": 2, "submitted_at": "2026-10-22T12:00:00Z", "submission_type": "online_upload",
+                 "attachments": [{"display_name": "final.pdf", "size": 42, "canvadoc_document_id": 3}]}
+            ],
+            "submission_comments": [
+                {"id": 42, "author_name": "Dr Lee", "created_at": "2026-10-23T09:00:00Z",
+                 "comment": "Much better, but check the timings table.", "attempt": 2,
+                 "attachments": [{"id": 77, "display_name": "marked.pdf", "size": 400}]},
+                {"id": 43, "author_name": "Dr Lee", "created_at": "2026-10-23T10:00:00Z", "comment": ""}
+            ],
+            "rubric_assessment": {"_1": {"points": 6.5, "comments": "Kernel is right."}}
+        }))
+        .unwrap();
+        deliver(&mut app, effects, Payload::History(history));
+        // Tab past the attempts to the feedback.
+        for _ in 0..2 {
+            app.update(Msg::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        }
+        let s = screen(&mut app, 100, 24);
+        println!("{s}\n");
+        assert!(s.contains("Feedback (3)"), "{s}");
+        assert!(
+            s.contains("Dr Lee") && s.contains("check the timings table"),
+            "{s}"
+        );
+        assert!(s.contains("marked.pdf"), "{s}");
+        assert!(s.contains("Lab rubric: 6.5 of 8"), "{s}");
+        assert!(s.contains("Correctness") && s.contains("6.5 / 8"), "{s}");
+        assert!(s.contains("Kernel is right."), "{s}");
+        // Neither of the two kinds Canvas keeps only in the browser is faked
+        // as text; both say how to see them.
+        assert!(s.contains("no text here"), "{s}");
+        assert!(s.contains("document viewer"), "{s}");
+        // The hint line offers this section's own keys.
+        assert!(
+            s.contains("d download") && s.contains("D all feedback"),
+            "{s}"
+        );
     }
 
     #[test]
