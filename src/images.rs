@@ -99,8 +99,10 @@ pub fn help_line() -> String {
     if found == Protocol::HalfBlock {
         "Images in text are drawn as half blocks.".to_string()
     } else {
+        // The sharper protocols are chosen but not drawn yet, so say so rather
+        // than let the help claim something the screen does not do.
         format!(
-            "Images in text are drawn as half blocks; this terminal also reports {}.",
+            "Images in text are drawn as half blocks ({} is not drawn yet).",
             found.label()
         )
     }
@@ -114,11 +116,14 @@ pub fn protocol() -> Protocol {
     *DETECTED.get().unwrap_or(&Protocol::HalfBlock)
 }
 
-/// Ask the terminal what it supports, once, and remember the answer.
+/// Decide what to draw with, once, and remember it.
 ///
-/// Called from the runtime after the terminal is in raw mode, because the
-/// reply arrives on standard input as ordinary input bytes. Everything else
-/// reads the remembered answer through `protocol`.
+/// Half blocks are all this draws today, so nothing is asked of the terminal:
+/// only the setting is read. Asking a terminal for its device attributes means
+/// reading its reply off standard input, which blocks on a terminal that does
+/// not answer, and it would buy nothing until the sharper protocols are
+/// actually drawn. `choose` and `reports_sixel` are the pieces that path will
+/// need; they are kept and tested, but no query is sent.
 pub fn detect() {
     let _ = DETECTED.set(detect_now());
 }
@@ -132,7 +137,7 @@ fn detect_now() -> Protocol {
     }
     let kitty = std::env::var_os("KITTY_WINDOW_ID").is_some()
         || std::env::var("TERM").is_ok_and(|t| t.contains("kitty"));
-    choose(primary_device_attributes().as_deref(), kitty)
+    choose(None, kitty)
 }
 
 /// Read a forced protocol from the setting. `auto` and anything unrecognised
@@ -171,42 +176,6 @@ pub fn reports_sixel(reply: &str) -> bool {
         return false;
     };
     body.split(';').any(|a| a.trim() == "4")
-}
-
-/// Longest wait for a terminal that does not answer the query at all. A
-/// terminal that does answer is not waited for: the sentinel ends the read.
-const QUERY_TIMEOUT: Duration = Duration::from_millis(250);
-/// Device status report, which every terminal answers with `ESC [ 0 n`. Sent
-/// after the attributes query so a terminal that ignores the query still ends
-/// the read, instead of costing the whole timeout.
-const SENTINEL: &[u8] = b"\x1b[0n";
-
-/// Ask the terminal for its primary device attributes and read the reply.
-/// Returns `None` if there is no terminal or it does not answer.
-fn primary_device_attributes() -> Option<String> {
-    use std::io::{IsTerminal, Read, Write};
-
-    let mut out = std::io::stdout();
-    if !out.is_terminal() || !std::io::stdin().is_terminal() {
-        return None;
-    }
-    out.write_all(b"\x1b[c\x1b[5n").ok()?;
-    out.flush().ok()?;
-    // Raw mode is on, so the replies arrive as input bytes and are not echoed.
-    let deadline = Instant::now() + QUERY_TIMEOUT;
-    let mut reply: Vec<u8> = Vec::new();
-    let mut stdin = std::io::stdin();
-    let mut byte = [0u8; 1];
-    while Instant::now() < deadline && reply.len() < 128 {
-        match stdin.read(&mut byte) {
-            Ok(1) => reply.push(byte[0]),
-            _ => break,
-        }
-        if reply.ends_with(SENTINEL) {
-            break;
-        }
-    }
-    String::from_utf8(reply).ok().filter(|r| r.contains("[?"))
 }
 
 /// A page's text with its image boxes. `lines` is what the text converter

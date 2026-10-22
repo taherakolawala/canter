@@ -429,19 +429,20 @@ detecting one, for trying one out; `auto` and anything else mean "detect".
 
 ### Detection and the sharper protocols
 
-Detection lives in one place, `images::detect`, called once from `tui::run`
-after the terminal is in raw mode and before the input thread starts reading,
-so the terminal's reply arrives as input bytes, is not echoed, and is not taken
-for keystrokes. It writes a primary device attributes query followed by a device
-status report; the status report is answered by every terminal, so a terminal
-that ignores the first query ends the read at once instead of costing the whole
-250 ms timeout. Attribute 4 in the reply means sixel. The kitty graphics
-protocol is taken from `KITTY_WINDOW_ID` and `TERM`, which is what kitty itself
-documents. Everything else reads the remembered answer through
-`images::protocol`, which is "half blocks" until detection has run — so the
-headless `--dump` mode and the tests never depend on a terminal being there.
+The choice lives in one place, `images::detect`, called once from `tui::run`
+and read everywhere through `images::protocol`, which is "half blocks" until it
+has run — so the headless `--dump` mode and the tests never depend on a
+terminal being there. Today it reads only the settings and `KITTY_WINDOW_ID`
+and `TERM` (which is what kitty itself documents for its protocol). It asks the
+terminal nothing: finding out whether a terminal supports sixel means writing a
+device attributes query and reading the reply off standard input, and a
+blocking read on a terminal that never answers waits for a keystroke rather
+than for a timeout. That cost buys nothing while the sharper protocols are not
+drawn, so the query is left for the change that draws them. `choose` and
+`reports_sixel`, which turn such a reply into a protocol, are written and
+tested already.
 
-The sharper protocols are detected but **not drawn**. Both work by writing
+The sharper protocols are **not drawn**. Both work by writing
 escape sequences into the screen at a cursor position, and `ratatui` owns that
 screen: it keeps its own cell buffer and writes only the cells that changed
 between frames. Making sixel work means reserving cells that `ratatui` draws as

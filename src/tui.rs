@@ -580,10 +580,8 @@ pub fn run(config: &Config, options: Options) -> Result<(), String> {
     executor.evict_unused_files();
     let mut terminal =
         ratatui::try_init().map_err(|_| "Could not initialise the terminal.".to_string())?;
-    // The image capability query needs raw mode on, so its reply arrives as
-    // input bytes rather than being echoed, and needs to happen before the
-    // input thread starts reading, so the reply is not taken for keystrokes.
-    // This is the only call; everything else reads the remembered answer.
+    // Decide once what images are drawn with; everything else reads the
+    // remembered answer.
     crate::images::detect();
     let input = Input::spawn(executor.tx.clone());
     if let Ok(size) = terminal.size() {
