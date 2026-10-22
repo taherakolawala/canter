@@ -57,6 +57,12 @@ pub struct SubmittedFile {
     pub filename: Option<String>,
     #[serde(default)]
     pub size: Option<u64>,
+    /// Set when Canvas serves the file through its document viewer, which is
+    /// also where it draws annotations made on it.
+    #[serde(default)]
+    pub canvadoc_document_id: Option<Value>,
+    #[serde(default)]
+    pub preview_url: Option<String>,
 }
 
 impl SubmittedFile {
@@ -66,11 +72,114 @@ impl SubmittedFile {
             .or(self.filename.as_deref())
             .unwrap_or("file")
     }
+
+    /// Whether Canvas shows this file in its document viewer, so the
+    /// instructor may have drawn feedback on it that the API has no text for.
+    pub fn in_document_viewer(&self) -> bool {
+        self.canvadoc_document_id
+            .as_ref()
+            .is_some_and(|v| !v.is_null())
+            || self
+                .preview_url
+                .as_deref()
+                .is_some_and(|u| u.contains("canvadoc"))
+    }
+}
+
+/// One instructor comment on a submission. Canvas sends the comments of every
+/// attempt together, each tagged with the attempt it belongs to.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct Comment {
+    #[serde(default, deserialize_with = "crate::model::de_opt_id")]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub author_name: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub comment: Option<String>,
+    /// The attempt the comment was left on; absent on comments Canvas does not
+    /// tie to one.
+    #[serde(default)]
+    pub attempt: Option<i64>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    pub attachments: Vec<crate::model::CanvasFile>,
+    /// Audio or video left in Canvas; it has no text to show here.
+    #[serde(default)]
+    pub media_comment: Option<Value>,
+}
+
+/// Why a comment's content cannot be shown as text in the terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BrowserOnly {
+    /// An audio or video comment recorded in Canvas.
+    Media,
+    /// Canvas draws this one on the submitted document instead of writing it
+    /// out, so the API carries no text for it.
+    Annotation,
+}
+
+impl BrowserOnly {
+    pub fn describe(self) -> &'static str {
+        match self {
+            BrowserOnly::Media => {
+                "Audio or video comment; Canvas plays it only in the browser. Press o to open it."
+            }
+            BrowserOnly::Annotation => {
+                "Drawn on the submitted file in Canvas's document viewer, so it has no text here. Press o to open it."
+            }
+        }
+    }
+}
+
+impl Comment {
+    pub fn author(&self) -> &str {
+        self.author_name
+            .as_deref()
+            .filter(|a| !a.trim().is_empty())
+            .unwrap_or("Instructor")
+    }
+
+    pub fn text(&self) -> &str {
+        self.comment.as_deref().map(str::trim).unwrap_or("")
+    }
+
+    /// `None` when the comment's own words are in the response.
+    pub fn browser_only(&self) -> Option<BrowserOnly> {
+        if !self.text().is_empty() {
+            return None;
+        }
+        Some(if self.media_comment.is_some() {
+            BrowserOnly::Media
+        } else {
+            BrowserOnly::Annotation
+        })
+    }
+
+    /// Comment attachments whose ids are safe to put in a request path.
+    pub fn files(&self) -> impl Iterator<Item = &crate::model::CanvasFile> {
+        self.attachments.iter().filter(|f| valid_id(&f.id))
+    }
+}
+
+/// What the instructor scored one rubric criterion, keyed in the response by
+/// the criterion's id.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+pub struct CriterionScore {
+    #[serde(default)]
+    pub points: Option<f64>,
+    #[serde(default)]
+    pub comments: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct History {
     pub attempts: Vec<Attempt>,
+    /// Every instructor comment on this submission, newest last.
+    pub comments: Vec<Comment>,
+    /// The instructor's rubric scores, by criterion id. Canvas keeps one per
+    /// submission rather than one per attempt.
+    pub rubric: std::collections::HashMap<String, CriterionScore>,
 }
 
 #[derive(Deserialize)]
@@ -78,13 +187,31 @@ struct HistoryResponse {
     #[serde(flatten)]
     current: Attempt,
     submission_history: Vec<Attempt>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    submission_comments: Vec<Comment>,
+    #[serde(default, deserialize_with = "null_or_default")]
+    rubric_assessment: std::collections::HashMap<String, CriterionScore>,
 }
 
 impl History {
+    /// Comments shown with one attempt: those Canvas tagged with its number,
+    /// plus, on the latest attempt, the ones it tagged with no attempt.
+    pub fn comments_for(&self, attempt: Option<i64>, latest: bool) -> Vec<&Comment> {
+        self.comments
+            .iter()
+            .filter(|c| match c.attempt {
+                Some(n) => Some(n) == attempt,
+                None => latest,
+            })
+            .collect()
+    }
+
     pub fn parse(value: Value) -> Result<Self, serde_json::Error> {
         let HistoryResponse {
             current,
             submission_history: mut attempts,
+            mut submission_comments,
+            rubric_assessment,
         } = serde_json::from_value(value)?;
         if current.submitted_at.is_some()
             && !attempts
@@ -99,8 +226,45 @@ impl History {
                 .cmp(&a.attempt)
                 .then_with(|| b.submitted_at.cmp(&a.submitted_at))
         });
-        Ok(Self { attempts })
+        submission_comments.sort_by_key(|c| c.created_at);
+        Ok(Self {
+            attempts,
+            comments: submission_comments,
+            rubric: rubric_assessment,
+        })
     }
+}
+
+/// Plain text (an instructor comment, a rubric note) wrapped to `width`
+/// columns at word boundaries, keeping the blank lines the author left.
+pub fn wrap(text: &str, width: usize) -> Vec<String> {
+    let width = width.clamp(10, 400);
+    let mut out = Vec::new();
+    // Split the lines first: sanitising drops the line breaks with the other
+    // control characters.
+    for paragraph in text.lines().map(crate::html::sanitize) {
+        let mut line = String::new();
+        for word in paragraph.split_whitespace() {
+            if line.is_empty() {
+                line.push_str(word);
+            } else if line.chars().count() + 1 + word.chars().count() <= width {
+                line.push(' ');
+                line.push_str(word);
+            } else {
+                out.push(std::mem::take(&mut line));
+                line.push_str(word);
+            }
+            // A single word longer than the line gets its own, overlong line.
+        }
+        out.push(line);
+    }
+    while out.last().is_some_and(String::is_empty) {
+        out.pop();
+    }
+    while out.first().is_some_and(String::is_empty) {
+        out.remove(0);
+    }
+    out
 }
 
 /// Local path matches are cached for the current directory, so typing each
@@ -446,6 +610,98 @@ mod tests {
         .unwrap();
         assert_eq!(fallback.attempts.len(), 1);
         assert!(History::parse(serde_json::json!({"attempt": 2})).is_err());
+    }
+
+    #[test]
+    fn parses_feedback_comments_and_rubric_scores_from_the_same_read() {
+        let value = serde_json::json!({
+            "attempt": 2,
+            "submitted_at": "2026-10-22T12:00:00Z",
+            "submission_type": "online_upload",
+            "attachments": [{"display_name": "final.pdf", "size": 20, "canvadoc_document_id": 991}],
+            "submission_history": [
+                {"attempt": 1, "submitted_at": "2026-10-20T12:00:00Z"},
+                {"attempt": 2, "submitted_at": "2026-10-22T12:00:00Z",
+                 "attachments": [{"display_name": "final.pdf", "size": 20, "canvadoc_document_id": 991}]}
+            ],
+            "submission_comments": [
+                {"id": 7, "author_name": "Dr Lee", "created_at": "2026-10-23T09:00:00Z",
+                 "comment": "Check the second proof.", "attempt": 2,
+                 "attachments": [{"id": 55, "display_name": "marked.pdf", "size": 400}]},
+                {"id": 6, "author_name": "Dr Lee", "created_at": "2026-10-21T09:00:00Z",
+                 "comment": "Rework the first part.", "attempt": 1},
+                {"id": 8, "created_at": "2026-10-24T09:00:00Z", "comment": "",
+                 "media_comment": {"media_id": "m-1"}},
+                {"id": 9, "created_at": "2026-10-24T10:00:00Z", "comment": "   "}
+            ],
+            "rubric_assessment": {
+                "_1": {"points": 4.0, "comments": "Clear."},
+                "_2": {"points": 1.5}
+            }
+        });
+        let history = History::parse(value).unwrap();
+        // Comments are ordered oldest first and tied to their attempt.
+        let latest = history.comments_for(Some(2), true);
+        assert_eq!(
+            latest
+                .iter()
+                .filter_map(|c| c.id.clone())
+                .collect::<Vec<_>>(),
+            ["7", "8", "9"],
+            "the latest attempt also shows the comments Canvas tags with no attempt"
+        );
+        let first = history.comments_for(Some(1), false);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].text(), "Rework the first part.");
+        assert_eq!(first[0].author(), "Dr Lee");
+        assert!(first[0].browser_only().is_none());
+        // Comments with no text cannot be shown here.
+        assert_eq!(latest[1].browser_only(), Some(BrowserOnly::Media));
+        assert_eq!(latest[2].browser_only(), Some(BrowserOnly::Annotation));
+        assert!(
+            BrowserOnly::Annotation.describe().contains("Press o"),
+            "the row tells the reader how to see it"
+        );
+        assert_eq!(latest[0].files().count(), 1);
+        assert_eq!(latest[0].files().next().unwrap().id, "55");
+        assert_eq!(history.rubric["_1"].points, Some(4.0));
+        assert_eq!(history.rubric["_1"].comments.as_deref(), Some("Clear."));
+        assert_eq!(history.rubric["_2"].comments, None);
+        // The submitted file is served through the document viewer, where
+        // Canvas also draws annotations.
+        assert!(history.attempts[0].attachments[0].in_document_viewer());
+        // A response without the includes still parses.
+        let plain = History::parse(serde_json::json!({
+            "attempt": 1, "submitted_at": "2026-10-20T12:00:00Z",
+            "submission_history": [], "submission_comments": null,
+            "rubric_assessment": null
+        }))
+        .unwrap();
+        assert!(plain.comments.is_empty() && plain.rubric.is_empty());
+    }
+
+    #[test]
+    fn comment_attachments_without_usable_ids_are_dropped() {
+        let history = History::parse(serde_json::json!({
+            "attempt": 1, "submitted_at": "2026-10-20T12:00:00Z", "submission_history": [],
+            "submission_comments": [{"id": 1, "comment": "see files", "attempt": 1,
+                "attachments": [{"id": "../etc", "display_name": "x"}, {"id": 12, "display_name": "ok.pdf"}]}]
+        }))
+        .unwrap();
+        let files: Vec<&str> = history.comments[0].files().map(|f| f.id.as_str()).collect();
+        assert_eq!(files, ["12"]);
+    }
+
+    #[test]
+    fn plain_text_wraps_at_word_boundaries_and_keeps_paragraphs() {
+        let lines = wrap("one two three four five\n\nsecond part", 10);
+        assert_eq!(
+            lines,
+            ["one two", "three four", "five", "", "second", "part"]
+        );
+        assert_eq!(wrap("   ", 20), Vec::<String>::new());
+        // Terminal control sequences never reach the screen.
+        assert_eq!(wrap("a\u{1b}[31mb", 20), ["ab"]);
     }
 
     #[test]

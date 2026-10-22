@@ -74,7 +74,9 @@ pub async fn assignment(
         .await
 }
 
-/// Fetched only when the student opens an assignment's past submissions.
+/// The attempt history and the instructor's feedback on it. Canvas returns
+/// the comments and the rubric scores as includes on the same submission read,
+/// so the assignment page still costs one request for all of it.
 pub async fn submission_history(
     client: &CanvasClient,
     course_id: &str,
@@ -83,7 +85,8 @@ pub async fn submission_history(
     check(course_id)?;
     check(assignment_id)?;
     let path = format!(
-        "/api/v1/courses/{course_id}/assignments/{assignment_id}/submissions/self?include[]=submission_history"
+        "/api/v1/courses/{course_id}/assignments/{assignment_id}/submissions/self\
+         ?include[]=submission_history&include[]=submission_comments&include[]=rubric_assessment"
     );
     let (value, stats) = client.get_json(&path).await?;
     let history = crate::submission::History::parse(value)
@@ -393,6 +396,27 @@ mod tests {
                 "/courses/10/assignments/20/submissions/self?include[]=submission_history"
             )
         );
+    }
+
+    #[tokio::test]
+    async fn feedback_comes_with_the_attempts_in_one_request() {
+        let t = FakeTransport::new(vec![json(
+            200,
+            r#"{
+            "attempt":1,"submitted_at":"2026-10-22T12:00:00Z",
+            "submission_history":[{"attempt":1,"submitted_at":"2026-10-22T12:00:00Z"}],
+            "submission_comments":[{"id":4,"author_name":"Dr Lee","comment":"Good start."}],
+            "rubric_assessment":{"_1":{"points":3.0}}}"#,
+        )]);
+        let c = client(t.clone());
+        let (history, stats) = submission_history(&c, "10", "20").await.unwrap();
+        assert_eq!(stats.requests, 1, "the feedback adds no request");
+        assert_eq!(history.comments.len(), 1);
+        assert_eq!(history.rubric["_1"].points, Some(3.0));
+        let url = &t.requests.lock().unwrap()[0].url;
+        assert!(url.contains("include[]=submission_comments"), "{url}");
+        assert!(url.contains("include[]=rubric_assessment"), "{url}");
+        assert!(url.contains("include[]=submission_history"), "{url}");
     }
 
     #[tokio::test]

@@ -132,6 +132,53 @@ pub struct AssignmentDetail {
     pub allowed_extensions: Vec<String>,
     #[serde(default)]
     pub grading_type: Option<String>,
+    /// The rubric the instructor grades with, when the assignment has one.
+    /// Canvas sends it with the assignment itself, so reading it costs nothing.
+    #[serde(default, deserialize_with = "de_null_default")]
+    pub rubric: Vec<RubricCriterion>,
+    #[serde(default)]
+    pub rubric_settings: Option<RubricSettings>,
+}
+
+/// One row of an assignment's rubric. Criterion ids are not Canvas object ids
+/// (Canvas sends things like `_6350`), so they never reach a path or file name.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RubricCriterion {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub long_description: Option<String>,
+    #[serde(default)]
+    pub points: Option<f64>,
+}
+
+impl RubricCriterion {
+    pub fn title(&self) -> &str {
+        self.description
+            .as_deref()
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or("(unnamed criterion)")
+    }
+}
+
+/// The rubric's own name and total, as Canvas reports them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RubricSettings {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub points_possible: Option<f64>,
+}
+
+/// Canvas sends an absent list as `null` on some fields; take it as empty.
+pub(crate) fn de_null_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 /// A Canvas file's metadata (`/api/v1/files/:id`, course file listings).
