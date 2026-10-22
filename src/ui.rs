@@ -1804,14 +1804,27 @@ fn section_heading(title: String, focused: bool, width: usize) -> Line<'static> 
     ])
 }
 
-/// The page's converted text (description or message).
-fn page_body<'a>(app: &'a App, page: &Page) -> &'a [String] {
+/// Put an image box under each `[image: ...][n]` mark, using the page's files
+/// & links list to find which library file the mark refers to. Runs in the
+/// same pass that wraps the text, so it is cached per version and width too.
+fn place_images(
+    app: &App,
+    page: &Page,
+    lines: Vec<String>,
+    text_width: u16,
+) -> crate::images::Body {
+    let links = app.page_links(page);
+    crate::images::place(lines, &links, app.library.as_deref(), text_width)
+}
+
+/// The page's converted text (description or message) with its image boxes.
+fn page_body<'a>(app: &'a App, page: &Page) -> Option<&'a crate::images::Body> {
     let render = match page {
         Page::Assignment(..) => app.detail_render.as_ref(),
         Page::Announcement(..) => app.announcement_render.as_ref(),
         Page::Wiki(..) => app.wiki_render.as_ref(),
     };
-    render.map(|r| r.lines.as_slice()).unwrap_or(&[])
+    render.map(|r| &r.body)
 }
 
 fn link_rows(
@@ -2092,11 +2105,12 @@ fn draw_page(
                     width,
                     &app.origin,
                 );
+                let body = place_images(app, page, lines, text_width);
                 app.detail_render = Some(DetailRender {
                     key: key.clone(),
                     version: res.version,
                     width: text_width,
-                    lines,
+                    body,
                 });
             }
             let detail = app.details[&key].data.as_ref().expect("checked");
@@ -2126,11 +2140,12 @@ fn draw_page(
                     width,
                     &app.origin,
                 );
+                let body = place_images(app, page, lines, text_width);
                 app.announcement_render = Some(DetailRender {
                     key: key.clone(),
                     version: res.version,
                     width: text_width,
-                    lines,
+                    body,
                 });
             }
             let detail = app.announcement_details[&key]
@@ -2156,11 +2171,12 @@ fn draw_page(
                     width,
                     &app.origin,
                 );
+                let body = place_images(app, page, lines, text_width);
                 app.wiki_render = Some(DetailRender {
                     key: key.clone(),
                     version: res.version,
                     width: text_width,
-                    lines,
+                    body,
                 });
             }
             let page = app.wiki_pages[&key].data.as_ref().expect("checked");
@@ -2197,7 +2213,7 @@ fn draw_page(
         "─".repeat(width),
         theme::faint(),
     )));
-    let body_len = page_body(app, page).len();
+    let body_len = page_body(app, page).map_or(0, |b| b.lines.len());
     if body_len == 0 {
         rows.push(PageRow::Line(Line::styled(empty, theme::muted())));
     } else {
@@ -2272,7 +2288,13 @@ fn draw_page(
         .take(height)
         .map(|row| match row {
             PageRow::Line(line) => line,
-            PageRow::Body(i) => style_line(&body[i]),
+            // An image box's rows draw cells; every other body row is text.
+            PageRow::Body(i) => match body {
+                Some(body) => body
+                    .image_row(i)
+                    .unwrap_or_else(|| style_line(&body.lines[i])),
+                None => Line::raw(""),
+            },
         })
         .collect();
     let inner = Rect {
@@ -2402,6 +2424,10 @@ fn draw_help(frame: &mut Frame, area: Rect, app: &mut App) {
     ] {
         lines.push(Line::styled(format!("  {text}"), theme::muted()));
     }
+    lines.push(Line::styled(
+        format!("  {}", crate::images::help_line()),
+        theme::muted(),
+    ));
     let rect = centered(area, area.width.saturating_sub(4).min(90), area.height);
     let inner = usize::from(rect.height.saturating_sub(2));
     let scroll = scroll.min(lines.len().saturating_sub(inner));
@@ -2951,7 +2977,7 @@ mod tests {
                 let rendered = screen(&mut app, 100, 40);
                 assert!(!rendered.contains("(No message)"), "saved message hidden");
                 assert!(
-                    app.announcement_render.as_ref().unwrap().lines == expected,
+                    app.announcement_render.as_ref().unwrap().body.lines == expected,
                     "saved body not rendered intact"
                 );
                 checked += 1;

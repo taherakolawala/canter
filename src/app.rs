@@ -510,12 +510,14 @@ impl View {
     }
 }
 
-/// Wrapped description lines cached per assignment version and width.
+/// Wrapped description lines cached per assignment version and width. Inline
+/// images are placed in the same pass, so a box's rows are ordinary lines as
+/// far as the page's scrolling is concerned.
 pub struct DetailRender {
     pub key: (String, String),
     pub version: u64,
     pub width: u16,
-    pub lines: Vec<String>,
+    pub body: crate::images::Body,
 }
 
 pub struct HistoryRender {
