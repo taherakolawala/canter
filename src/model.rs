@@ -116,6 +116,9 @@ pub struct AssignmentSummary {
     /// Course-defined order; Canvas uses it to order assignments with equal due dates.
     #[serde(default)]
     pub position: Option<i64>,
+    /// Graded, but left out of the course total by the instructor.
+    #[serde(default)]
+    pub omit_from_final_grade: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

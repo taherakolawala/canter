@@ -40,6 +40,7 @@ pub enum Act {
     JumpToLink,
     HideCourse,
     ShowHidden,
+    ShowGrades,
     OpenLibrary,
     SignIn,
     InputDone,
@@ -51,7 +52,7 @@ pub enum Act {
 
 impl Act {
     #[cfg(test)]
-    pub const ALL: [Act; 32] = [
+    pub const ALL: [Act; 33] = [
         Act::Up,
         Act::Down,
         Act::Left,
@@ -77,6 +78,7 @@ impl Act {
         Act::JumpToLink,
         Act::HideCourse,
         Act::ShowHidden,
+        Act::ShowGrades,
         Act::OpenLibrary,
         Act::SignIn,
         Act::InputDone,
@@ -422,6 +424,9 @@ pub static BINDINGS: &[Binding] = &[
     b(Act::ShowHidden, &[], &[Courses], "hidden")
         .title("Show or stop showing hidden courses")
         .menu('H', Group::Here),
+    b(Act::ShowGrades, &[], &[Courses], "grades")
+        .title("Show or hide the current grade of every course")
+        .menu('g', Group::Here),
     // The app.
     b(Act::OpenLibrary, &[], &[Screen], "your files")
         .title("Open your TUICanvas folder")

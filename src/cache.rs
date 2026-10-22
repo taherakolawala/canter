@@ -30,6 +30,8 @@ pub enum ResourceKey {
     Modules(String),
     /// A course wiki page, by its URL name.
     WikiPage(String, String),
+    /// A course's grades: its groups, scores and instructor comments.
+    Grades(String),
 }
 
 impl ResourceKey {
@@ -64,6 +66,7 @@ impl ResourceKey {
             ResourceKey::WikiPage(c, u) if ok(c) && crate::modules::valid_slug(u) => {
                 format!("page-{}-{u}", c.replace('~', "_"))
             }
+            ResourceKey::Grades(c) if ok(c) => format!("grades-{}", c.replace('~', "_")),
             _ => return None,
         };
         Some(name + ".json")
@@ -84,6 +87,7 @@ impl ResourceKey {
             ResourceKey::Tabs(_) => "course tabs",
             ResourceKey::Modules(_) => "modules",
             ResourceKey::WikiPage(..) => "page",
+            ResourceKey::Grades(_) => "grades",
         }
     }
 }
@@ -165,6 +169,29 @@ impl SnapshotStore {
 
     pub fn save_announcement_reads(&self, reads: &std::collections::BTreeSet<(String, String)>) {
         self.save_named("local-announcement-reads.json", reads, Utc::now());
+    }
+
+    /// Instructor comments already seen in TUICanvas, by course and
+    /// assignment. Canvas is never told what has been read.
+    pub fn seen_feedback(&self) -> std::collections::BTreeSet<(String, String)> {
+        self.load_named("local-seen-feedback.json")
+            .map(|(seen, _)| seen)
+            .unwrap_or_default()
+    }
+
+    pub fn save_seen_feedback(&self, seen: &std::collections::BTreeSet<(String, String)>) {
+        self.save_named("local-seen-feedback.json", seen, Utc::now());
+    }
+
+    /// One switch for every course: whether the course list shows grades.
+    pub fn show_course_grades(&self) -> bool {
+        self.load_named("local-show-course-grades.json")
+            .map(|(on, _)| on)
+            .unwrap_or(false)
+    }
+
+    pub fn save_show_course_grades(&self, on: bool) {
+        self.save_named("local-show-course-grades.json", &on, Utc::now());
     }
 
     /// Local course visibility does not change Canvas enrollment or its course snapshot.

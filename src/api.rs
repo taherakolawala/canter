@@ -243,6 +243,7 @@ impl GqlAssignment {
             points_possible: self.points_possible,
             submission_types: self.submission_types.unwrap_or_default(),
             html_url: self.html_url,
+            omit_from_final_grade: None,
             locked_for_user: self.lock_info.and_then(|l| l.is_locked),
             submission,
             position: self.position,

@@ -108,6 +108,9 @@ fn current_has_data(app: &App) -> bool {
         ViewKind::Modules { course_id, .. } => {
             app.modules.get(course_id).is_some_and(|r| r.data.is_some())
         }
+        ViewKind::Grades { course_id, .. } => {
+            app.grades.get(course_id).is_some_and(|r| r.data.is_some())
+        }
         ViewKind::WikiPage {
             course_id,
             page_url,
@@ -217,6 +220,10 @@ fn find_row(app: &App, needle: &str) -> Option<usize> {
             ViewKind::Modules { course_id, .. } => {
                 matches!(app.module_rows(course_id).get(i), Some(crate::app::ModuleRow::Item(_, it))
                     if it.title().to_lowercase().contains(&needle))
+            }
+            ViewKind::Grades { course_id, .. } => {
+                matches!(app.grade_rows(course_id).get(i), Some(crate::app::GradeRow::Assignment(_, a))
+                    if a.title().to_lowercase().contains(&needle))
             }
             ViewKind::Announcements { course_id, .. } => app
                 .announcements

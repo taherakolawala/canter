@@ -131,6 +131,9 @@ impl Executor {
                 ResourceKey::WikiPage(c, u) => crate::modules::page(&client, c, u)
                     .await
                     .map(|(v, s)| (Payload::WikiPage(Box::new(v)), s)),
+                ResourceKey::Grades(c) => crate::grades::read(&client, c)
+                    .await
+                    .map(|(v, s)| (Payload::Grades(Box::new(v)), s)),
             };
             let at = Utc::now();
             if let Ok((payload, _)) = &result {
@@ -148,6 +151,7 @@ impl Executor {
                     Payload::Tabs(v) => store.save(&key, v, at),
                     Payload::Modules(v) => store.save(&key, v, at),
                     Payload::WikiPage(v) => store.save(&key, v.as_ref(), at),
+                    Payload::Grades(v) => store.save(&key, v.as_ref(), at),
                 }
             }
             persist_rotated_cookies(&client, &session, &session_path);
@@ -892,6 +896,17 @@ pub fn dump(config: &Config, out: &Path, course: &str, assignment: &str) -> Resu
             let effects = app.update(press(KeyCode::Enter));
             step(&mut app, effects, "4c-page", &mut timings)?;
         }
+    }
+    // Grades, where Canvas shows the tab for this course.
+    while app.stack.len() > 2 {
+        app.update(press(KeyCode::Esc));
+    }
+    for _ in 0..5 {
+        if tab_now(&app) == Some(CourseTab::Grades) {
+            break;
+        }
+        let effects = app.update(press(KeyCode::Tab));
+        step(&mut app, effects, "4d-grades", &mut timings)?;
     }
     while app.stack.len() > 2 {
         app.update(press(KeyCode::Esc));

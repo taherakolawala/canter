@@ -10,6 +10,7 @@ mod canvas;
 mod config;
 mod diag;
 mod download;
+mod grades;
 mod html;
 mod keys;
 mod library;

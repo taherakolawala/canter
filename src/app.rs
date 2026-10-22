@@ -74,6 +74,7 @@ pub enum Payload {
     Tabs(Vec<crate::modules::Tab>),
     Modules(Vec<crate::modules::Module>),
     WikiPage(Box<crate::modules::WikiPage>),
+    Grades(Box<crate::grades::Grades>),
 }
 
 /// One row of the Modules screen: a module's heading or one of its items.
@@ -90,6 +91,21 @@ impl ModuleRow<'_> {
     }
 }
 
+/// One row of the Grades screen: an assignment group's heading or one of its
+/// assignments.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GradeRow<'a> {
+    Group(&'a crate::grades::Group),
+    Assignment(&'a crate::grades::Group, &'a AssignmentSummary),
+}
+
+impl GradeRow<'_> {
+    /// Group headings are not selectable, as module headings are not.
+    pub fn selectable(&self) -> bool {
+        matches!(self, GradeRow::Assignment(..))
+    }
+}
+
 /// A course section the reader can show, when Canvas shows its tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CourseTab {
@@ -99,6 +115,7 @@ pub enum CourseTab {
     Announcements,
     Files,
     Modules,
+    Grades,
 }
 
 impl CourseTab {
@@ -109,6 +126,7 @@ impl CourseTab {
             CourseTab::Announcements => "Announcements",
             CourseTab::Files => "Files",
             CourseTab::Modules => "Modules",
+            CourseTab::Grades => "Grades",
         }
     }
 
@@ -118,6 +136,7 @@ impl CourseTab {
             "announcements" => Some(CourseTab::Announcements),
             "files" => Some(CourseTab::Files),
             "modules" => Some(CourseTab::Modules),
+            "grades" => Some(CourseTab::Grades),
             _ => None,
         }
     }
@@ -144,6 +163,10 @@ impl CourseTab {
                 folder_id: None,
             },
             CourseTab::Modules => ViewKind::Modules {
+                course_id,
+                course_name,
+            },
+            CourseTab::Grades => ViewKind::Grades {
                 course_id,
                 course_name,
             },
@@ -365,6 +388,10 @@ pub enum ViewKind {
         course_id: String,
         course_name: String,
     },
+    Grades {
+        course_id: String,
+        course_name: String,
+    },
     WikiPage {
         course_id: String,
         course_name: String,
@@ -423,6 +450,10 @@ impl ViewKind {
                 course_id,
                 course_name,
             } => Some((CourseTab::Modules, course_id, course_name)),
+            ViewKind::Grades {
+                course_id,
+                course_name,
+            } => Some((CourseTab::Grades, course_id, course_name)),
             ViewKind::WikiPage {
                 course_id,
                 course_name,
@@ -500,6 +531,7 @@ impl View {
             } => ResourceKey::Detail(course_id.clone(), assignment_id.clone()),
             ViewKind::Files { course_id, .. } => ResourceKey::Files(course_id.clone()),
             ViewKind::Modules { course_id, .. } => ResourceKey::Modules(course_id.clone()),
+            ViewKind::Grades { course_id, .. } => ResourceKey::Grades(course_id.clone()),
             ViewKind::WikiPage {
                 course_id,
                 page_url,
@@ -580,6 +612,12 @@ pub struct App {
     pub tabs: HashMap<String, Resource<Vec<crate::modules::Tab>>>,
     tabs_read: std::collections::HashSet<String>,
     pub modules: HashMap<String, Resource<Vec<crate::modules::Module>>>,
+    pub grades: HashMap<String, Resource<crate::grades::Grades>>,
+    /// Instructor comments already seen here, by course and assignment. Local
+    /// only: Canvas is never told what has been read.
+    seen_feedback: std::collections::BTreeSet<(String, String)>,
+    /// Show each course's current grade on the course list (one switch for all).
+    pub show_course_grades: bool,
     pub wiki_pages: HashMap<(String, String), Resource<crate::modules::WikiPage>>,
     pub wiki_render: Option<DetailRender>,
     /// Module files waiting for their details (and their course's folders).
@@ -588,6 +626,24 @@ pub struct App {
 
 fn matches_filter(text: &str, filter: &str) -> bool {
     filter.is_empty() || text.to_lowercase().contains(&filter.to_lowercase())
+}
+
+/// `91.5%`, `88%`: a Canvas score, without a trailing `.0`.
+pub fn percent(score: f64) -> String {
+    if (score - score.round()).abs() < 0.05 {
+        format!("{}%", score.round())
+    } else {
+        format!("{score:.1}%")
+    }
+}
+
+/// `9 of 10`, `9.5 of 10`: points as Canvas shows them.
+pub fn points(score: f64) -> String {
+    if (score - score.round()).abs() < 0.005 {
+        format!("{}", score.round())
+    } else {
+        format!("{score:.2}")
+    }
 }
 
 /// `1.2 MB`, `340 KB`, `12 B` (1 KB = 1024 B).
@@ -628,6 +684,11 @@ impl App {
             .as_ref()
             .map(|s| s.hidden_courses())
             .unwrap_or_default();
+        let seen_feedback = store
+            .as_ref()
+            .map(|s| s.seen_feedback())
+            .unwrap_or_default();
+        let show_course_grades = store.as_ref().is_some_and(|s| s.show_course_grades());
         App {
             origin: origin.to_string(),
             store,
@@ -670,6 +731,9 @@ impl App {
             tabs: HashMap::new(),
             tabs_read: std::collections::HashSet::new(),
             modules: HashMap::new(),
+            grades: HashMap::new(),
+            seen_feedback,
+            show_course_grades,
             wiki_pages: HashMap::new(),
             wiki_render: None,
             module_waiting: HashMap::new(),
@@ -709,6 +773,7 @@ impl App {
             ResourceKey::File(f) => self.files.get(f).map(|r| &r.sync),
             ResourceKey::Tabs(c) => self.tabs.get(c).map(|r| &r.sync),
             ResourceKey::Modules(c) => self.modules.get(c).map(|r| &r.sync),
+            ResourceKey::Grades(c) => self.grades.get(c).map(|r| &r.sync),
             ResourceKey::WikiPage(c, u) => self
                 .wiki_pages
                 .get(&(c.clone(), u.clone()))
@@ -747,6 +812,7 @@ impl App {
             ResourceKey::File(f) => self.files.entry(f.clone()).or_default().sync = sync,
             ResourceKey::Tabs(c) => self.tabs.entry(c.clone()).or_default().sync = sync,
             ResourceKey::Modules(c) => self.modules.entry(c.clone()).or_default().sync = sync,
+            ResourceKey::Grades(c) => self.grades.entry(c.clone()).or_default().sync = sync,
             ResourceKey::WikiPage(c, u) => {
                 self.wiki_pages
                     .entry((c.clone(), u.clone()))
@@ -928,6 +994,17 @@ impl App {
             }
             ResourceKey::Modules(c) => {
                 let res = self.modules.entry(c.clone()).or_default();
+                if res.data.is_none()
+                    && let Some((data, at)) = store.load(key)
+                {
+                    res.data = Some(data);
+                    res.fetched_at = Some(at);
+                    res.origin = Origin::Cache;
+                    res.version += 1;
+                }
+            }
+            ResourceKey::Grades(c) => {
+                let res = self.grades.entry(c.clone()).or_default();
                 if res.data.is_none()
                     && let Some((data, at)) = store.load(key)
                 {
@@ -1200,6 +1277,14 @@ impl App {
                         r.version += 1;
                         effects.extend(self.follow_tabs());
                     }
+                    (Payload::Grades(grades), ResourceKey::Grades(c)) => {
+                        let r = self.grades.entry(c.clone()).or_default();
+                        r.data = Some(*grades);
+                        r.origin = Origin::Network;
+                        r.fetched_at = Some(at);
+                        r.sync = SyncState::Idle;
+                        r.version += 1;
+                    }
                     (Payload::Modules(list), ResourceKey::Modules(c)) => {
                         let r = self.modules.entry(c.clone()).or_default();
                         r.data = Some(list);
@@ -1310,6 +1395,7 @@ impl App {
             | ViewKind::CourseHome { .. } => vec![],
             ViewKind::Files { .. } => (0..self.file_rows().len()).collect(),
             ViewKind::Modules { course_id, .. } => self.visible_modules(course_id, &view.filter),
+            ViewKind::Grades { course_id, .. } => self.visible_grades(course_id, &view.filter),
         }
     }
 
@@ -1318,6 +1404,13 @@ impl App {
         match &self.view().kind {
             ViewKind::Modules { course_id, .. } => {
                 let rows = self.module_rows(course_id);
+                self.visible_rows()
+                    .iter()
+                    .map(|&i| rows.get(i).is_some_and(|r| r.selectable()))
+                    .collect()
+            }
+            ViewKind::Grades { course_id, .. } => {
+                let rows = self.grade_rows(course_id);
                 self.visible_rows()
                     .iter()
                     .map(|&i| rows.get(i).is_some_and(|r| r.selectable()))
@@ -1408,6 +1501,137 @@ impl App {
         self.module_rows(course_id).get(index).copied()
     }
 
+    /// Every group heading and graded assignment of a course, in Canvas's
+    /// order.
+    pub fn grade_rows(&self, course_id: &str) -> Vec<GradeRow<'_>> {
+        let mut rows = Vec::new();
+        for g in self
+            .grades
+            .get(course_id)
+            .and_then(|r| r.data.as_ref())
+            .map(|g| g.groups.as_slice())
+            .unwrap_or(&[])
+        {
+            rows.push(GradeRow::Group(g));
+            rows.extend(g.assignments.iter().map(|a| GradeRow::Assignment(g, a)));
+        }
+        rows
+    }
+
+    /// Grade rows matching a search: matching assignments under their group's
+    /// heading, or a whole group whose name matches.
+    fn visible_grades(&self, course_id: &str, filter: &str) -> Vec<usize> {
+        let groups = self
+            .grades
+            .get(course_id)
+            .and_then(|r| r.data.as_ref())
+            .map(|g| g.groups.as_slice())
+            .unwrap_or(&[]);
+        let mut out = Vec::new();
+        let mut at = 0;
+        for g in groups {
+            let head = at;
+            let whole = matches_filter(g.name(), filter);
+            let hits: Vec<usize> = g
+                .assignments
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| whole || matches_filter(a.title(), filter))
+                .map(|(k, _)| head + 1 + k)
+                .collect();
+            if whole || !hits.is_empty() {
+                out.push(head);
+                out.extend(hits);
+            }
+            at += 1 + g.assignments.len();
+        }
+        out
+    }
+
+    /// The selected row of the Grades screen.
+    pub fn selected_grade_row(&self) -> Option<GradeRow<'_>> {
+        let ViewKind::Grades { course_id, .. } = &self.view().kind else {
+            return None;
+        };
+        let index = *self.visible_rows().get(self.view().selected)?;
+        self.grade_rows(course_id).get(index).copied()
+    }
+
+    /// Whether an assignment has instructor comments that have not been opened
+    /// in TUICanvas yet. Canvas is never told what has been seen.
+    pub fn unseen_feedback(&self, course_id: &str, assignment_id: &str) -> bool {
+        self.grades
+            .get(course_id)
+            .and_then(|r| r.data.as_ref())
+            .and_then(|g| g.feedback_for(assignment_id))
+            .is_some()
+            && !self
+                .seen_feedback
+                .contains(&(course_id.to_string(), assignment_id.to_string()))
+    }
+
+    /// Marks an assignment's instructor comments as seen here, which clears its
+    /// mark on the Grades tab. Saved locally, like hidden courses.
+    pub fn mark_feedback_seen(&mut self, course_id: &str, assignment_id: &str) {
+        if !crate::model::valid_id(course_id) || !crate::model::valid_id(assignment_id) {
+            return;
+        }
+        let key = (course_id.to_string(), assignment_id.to_string());
+        if self.seen_feedback.insert(key) {
+            self.dirty = true;
+            if let Some(store) = &self.store {
+                store.save_seen_feedback(&self.seen_feedback);
+            }
+        }
+    }
+
+    /// Turns the current grade on the course list on or off, for every course
+    /// at once, and remembers the choice.
+    pub fn toggle_course_grades(&mut self) -> Vec<Effect> {
+        self.show_course_grades = !self.show_course_grades;
+        self.dirty = true;
+        if let Some(store) = &self.store {
+            store.save_show_course_grades(self.show_course_grades);
+        }
+        self.notice = Some(if self.show_course_grades {
+            "Showing each course's current grade.".into()
+        } else {
+            "Course grades hidden.".into()
+        });
+        if !self.show_course_grades {
+            return vec![];
+        }
+        // Read the grades of the courses on screen, where they are not known.
+        let ids: Vec<String> = self
+            .visible_rows()
+            .iter()
+            .filter_map(|&i| self.courses.data.as_ref()?.get(i).map(|c| c.id.clone()))
+            .filter(|id| self.grades.get(id).and_then(|r| r.data.as_ref()).is_none())
+            .collect();
+        let mut effects = Vec::new();
+        for id in ids {
+            self.load_snapshot(&ResourceKey::Grades(id.clone()));
+            effects.extend(self.request(ResourceKey::Grades(id), false));
+        }
+        effects
+    }
+
+    /// The course's current grade for the course list: its letter grade, or
+    /// its percentage where the course has no letter grades.
+    pub fn course_grade(&self, course_id: &str) -> Option<String> {
+        let total = self
+            .grades
+            .get(course_id)
+            .and_then(|r| r.data.as_ref())
+            .and_then(|g| g.total.as_ref())?;
+        match (total.grade.as_deref(), total.score) {
+            (Some(letter), Some(score)) => Some(format!("{letter} {}", percent(score))),
+            (Some(letter), None) => Some(letter.to_string()),
+            (None, Some(score)) => Some(percent(score)),
+            (None, None) => None,
+        }
+    }
+
     /// The course sections Canvas shows, in its order. The course home comes
     /// first when it is modules or assignments, since Canvas shows those on
     /// Home even with their own tab hidden. Before the tabs are known, all.
@@ -1435,6 +1659,7 @@ impl App {
                 CourseTab::Files,
                 CourseTab::Announcements,
                 CourseTab::Modules,
+                CourseTab::Grades,
             ] {
                 if !out.contains(&tab) {
                     out.push(tab);
@@ -2216,9 +2441,9 @@ impl App {
                 Section::Day => scopes.extend([Scope::Courses, Scope::Day]),
                 _ => scopes.extend([Scope::List, Scope::Courses]),
             },
-            ViewKind::Assignments { .. } | ViewKind::Announcements { .. } => {
-                scopes.extend([Scope::List, Scope::CourseTabs])
-            }
+            ViewKind::Assignments { .. }
+            | ViewKind::Announcements { .. }
+            | ViewKind::Grades { .. } => scopes.extend([Scope::List, Scope::CourseTabs]),
             // Modules share the Files keys: d, D and e work on module files.
             ViewKind::Files { .. } | ViewKind::Modules { .. } => {
                 scopes.extend([Scope::List, Scope::CourseTabs, Scope::Files])
@@ -2418,6 +2643,8 @@ impl App {
             }
             Act::ShowHidden if self.show_hidden => "Stop showing hidden courses".into(),
             Act::ShowHidden => "Show hidden courses".into(),
+            Act::ShowGrades if self.show_course_grades => "Hide course grades".into(),
+            Act::ShowGrades => "Show each course's current grade".into(),
             _ => binding.title.into(),
         }
     }
@@ -2588,6 +2815,7 @@ impl App {
                 self.toggle_selected_course_hidden();
                 vec![]
             }
+            Act::ShowGrades => self.toggle_course_grades(),
             Act::ShowHidden => {
                 self.show_hidden = !self.show_hidden;
                 self.notice = Some(if self.show_hidden {
@@ -3687,6 +3915,27 @@ impl App {
                     title: a.title().to_string(),
                 }
             }
+            ViewKind::Grades {
+                course_id,
+                course_name,
+            } => {
+                let (course_id, course_name) = (course_id.clone(), course_name.clone());
+                let Some(GradeRow::Assignment(_, a)) =
+                    self.grade_rows(&course_id).get(index).copied()
+                else {
+                    return vec![];
+                };
+                let (assignment_id, title) = (a.id.clone(), a.title().to_string());
+                // Opening the assignment is where its feedback is read, so its
+                // mark on this tab is cleared.
+                self.mark_feedback_seen(&course_id, &assignment_id);
+                ViewKind::Detail {
+                    course_id,
+                    course_name,
+                    assignment_id,
+                    title,
+                }
+            }
             ViewKind::Detail { .. }
             | ViewKind::Announcement { .. }
             | ViewKind::WikiPage { .. }
@@ -3757,6 +4006,16 @@ impl App {
             ViewKind::CourseHome { course_id, .. } => {
                 Some(format!("{}/courses/{course_id}", self.origin))
             }
+            ViewKind::Grades { course_id, .. } => Some(match self.selected_grade_row() {
+                Some(GradeRow::Assignment(_, a)) => a
+                    .html_url
+                    .clone()
+                    .filter(|u| same_origin(u))
+                    .unwrap_or_else(|| {
+                        format!("{}/courses/{course_id}/assignments/{}", self.origin, a.id)
+                    }),
+                _ => format!("{}/courses/{course_id}/grades", self.origin),
+            }),
             ViewKind::Announcements { course_id, .. } => {
                 let base = format!("{}/courses/{course_id}/announcements", self.origin);
                 let rows = self.visible_rows();
@@ -4536,7 +4795,8 @@ mod tests {
         let mut app = app_with_courses();
         app.store = Some(store.clone());
         app.update(key(KeyCode::Enter));
-        app.update(key(KeyCode::BackTab)); // Modules, last before Canvas's tabs are known
+        app.update(key(KeyCode::BackTab)); // Grades, last before Canvas's tabs are known
+        app.update(key(KeyCode::BackTab)); // Modules
         let (k, r) = fetch_of(&app.update(key(KeyCode::BackTab)));
         let summary = crate::announcements::Summary {
             id: "8".into(),
@@ -4594,7 +4854,8 @@ mod tests {
         ] {
             let mut app = app_with_courses();
             app.update(key(KeyCode::Enter));
-            app.update(key(KeyCode::BackTab)); // Modules, last before Canvas's tabs are known
+            app.update(key(KeyCode::BackTab)); // Grades, last before Canvas's tabs are known
+            app.update(key(KeyCode::BackTab)); // Modules
             let (k, r) = fetch_of(&app.update(key(KeyCode::BackTab)));
             let summary = crate::announcements::Summary {
                 id: "8".into(),
@@ -5112,7 +5373,7 @@ mod tests {
         answer(
             &mut app,
             other.clone(),
-            Payload::Tabs(vec![tab("home"), tab("grades")]),
+            Payload::Tabs(vec![tab("home"), tab("syllabus")]),
         );
         assert!(matches!(app.view().kind, ViewKind::CourseHome { .. }));
         assert_eq!(app.browser_url().unwrap(), format!("{ORIGIN}/courses/20"));
@@ -5353,5 +5614,222 @@ mod tests {
         );
         app.update(key(KeyCode::Tab));
         assert!(matches!(app.view().kind.tab(), Some((CourseTab::Home, ..))));
+    }
+
+    fn graded(id: &str, name: &str, points: f64, score: Option<f64>) -> AssignmentSummary {
+        AssignmentSummary {
+            id: id.into(),
+            name: Some(name.into()),
+            points_possible: Some(points),
+            submission: Some(crate::model::Submission {
+                score,
+                workflow_state: Some(
+                    if score.is_some() {
+                        "graded"
+                    } else {
+                        "unsubmitted"
+                    }
+                    .into(),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn grades_payload() -> Payload {
+        Payload::Grades(Box::new(crate::grades::Grades {
+            total: Some(crate::grades::Total {
+                score: Some(91.5),
+                grade: Some("A-".into()),
+            }),
+            weighted: true,
+            groups: vec![
+                crate::grades::Group {
+                    id: "100".into(),
+                    name: Some("Homework".into()),
+                    group_weight: Some(40.0),
+                    assignments: vec![
+                        graded("1", "HW 1", 10.0, Some(9.0)),
+                        graded("2", "HW 2", 10.0, None),
+                    ],
+                    ..Default::default()
+                },
+                crate::grades::Group {
+                    id: "200".into(),
+                    name: Some("Exams".into()),
+                    group_weight: Some(60.0),
+                    assignments: vec![graded("5", "Midterm", 100.0, Some(88.0))],
+                    ..Default::default()
+                },
+            ],
+            feedback: vec![crate::grades::Feedback {
+                assignment_id: "5".into(),
+                count: 2,
+                latest: Some(Utc::now()),
+            }],
+        }))
+    }
+
+    /// Opens a course whose only Canvas tab is Grades, with grades delivered.
+    fn grades_app(store: Option<Arc<SnapshotStore>>) -> App {
+        let mut app = app_with_courses();
+        app.store = store;
+        app.update(key(KeyCode::Enter));
+        answer(&mut app, tabs_key(), Payload::Tabs(vec![tab("grades")]));
+        answer(&mut app, ResourceKey::Grades("10".into()), grades_payload());
+        app
+    }
+
+    #[test]
+    fn the_grades_tab_is_shown_only_where_canvas_shows_it() {
+        let mut app = app_with_courses();
+        app.update(key(KeyCode::Enter));
+        answer(
+            &mut app,
+            tabs_key(),
+            Payload::Tabs(vec![tab("assignments"), tab("grades")]),
+        );
+        assert_eq!(
+            app.course_tabs("10"),
+            [CourseTab::Assignments, CourseTab::Grades]
+        );
+        // A course that hides the tab does not get the section.
+        app.update(key(KeyCode::Esc));
+        app.update(key(KeyCode::Down));
+        app.update(key(KeyCode::Enter));
+        answer(
+            &mut app,
+            ResourceKey::Tabs("20".into()),
+            Payload::Tabs(vec![tab("assignments")]),
+        );
+        assert_eq!(app.course_tabs("20"), [CourseTab::Assignments]);
+    }
+
+    #[test]
+    fn grade_rows_group_assignments_and_skip_the_headings() {
+        let mut app = grades_app(None);
+        assert!(matches!(app.view().kind, ViewKind::Grades { .. }));
+        // Two groups, three assignments.
+        assert_eq!(app.grade_rows("10").len(), 5);
+        // The cursor starts on the first assignment, not on its group heading.
+        assert!(matches!(
+            app.selected_grade_row(),
+            Some(GradeRow::Assignment(_, a)) if a.id == "1"
+        ));
+        // Down moves over the next group's heading to its first assignment.
+        app.update(key(KeyCode::Down));
+        app.update(key(KeyCode::Down));
+        assert!(matches!(
+            app.selected_grade_row(),
+            Some(GradeRow::Assignment(_, a)) if a.id == "5"
+        ));
+        // Search keeps a matching assignment under its group's heading.
+        app.update(key(KeyCode::Char('/')));
+        for c in "midterm".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.visible_rows(), [3, 4]);
+        assert!(matches!(
+            app.selected_grade_row(),
+            Some(GradeRow::Assignment(_, a)) if a.id == "5"
+        ));
+    }
+
+    #[test]
+    fn opening_graded_work_reads_the_assignment_and_clears_its_feedback_mark() {
+        let root = std::env::temp_dir().join(format!("tuicanvas-seen-{}", std::process::id()));
+        let store = Arc::new(SnapshotStore::new(&root, "reader"));
+        let mut app = grades_app(Some(store.clone()));
+        // The midterm has instructor comments that have not been opened here.
+        assert!(app.unseen_feedback("10", "5"));
+        assert!(!app.unseen_feedback("10", "1"));
+        app.update(key(KeyCode::Down));
+        app.update(key(KeyCode::Down));
+        let effects = app.update(key(KeyCode::Enter));
+        assert_eq!(
+            fetch_of(&effects).0,
+            ResourceKey::Detail("10".into(), "5".into())
+        );
+        assert!(!app.unseen_feedback("10", "5"));
+        assert_eq!(
+            app.browser_url().unwrap(),
+            format!("{ORIGIN}/courses/10/assignments/5")
+        );
+        // What was seen outlives the run, and Canvas is never told.
+        let mut restarted = App::new(ORIGIN, Some(store));
+        restarted.grades = std::mem::take(&mut app.grades);
+        assert!(!restarted.unseen_feedback("10", "5"));
+        let other = App::new(ORIGIN, Some(Arc::new(SnapshotStore::new(&root, "someone"))));
+        assert!(other.seen_feedback.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_group_heading_cannot_be_opened_and_o_falls_back_to_the_grades_page() {
+        let mut app = grades_app(None);
+        // Nothing to open while the search hides every assignment.
+        app.update(key(KeyCode::Char('/')));
+        for c in "nothing".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        app.update(key(KeyCode::Enter));
+        assert!(app.visible_rows().is_empty());
+        assert!(app.update(key(KeyCode::Enter)).is_empty());
+        assert_eq!(
+            app.browser_url().unwrap(),
+            format!("{ORIGIN}/courses/10/grades")
+        );
+    }
+
+    #[test]
+    fn one_switch_shows_every_course_grade_and_the_choice_is_saved() {
+        let root = std::env::temp_dir().join(format!("tuicanvas-cgrades-{}", std::process::id()));
+        let store = Arc::new(SnapshotStore::new(&root, "reader"));
+        let mut app = app_with_courses();
+        app.store = Some(store.clone());
+        assert!(!app.show_course_grades);
+        assert!(app.course_grade("10").is_none());
+        // Space then g turns it on for every course at once, and reads them.
+        app.update(key(KeyCode::Char(' ')));
+        let effects = app.update(key(KeyCode::Char('g')));
+        assert!(app.show_course_grades);
+        assert_eq!(
+            fetches(&effects),
+            [
+                ResourceKey::Grades("10".into()),
+                ResourceKey::Grades("20".into())
+            ]
+        );
+        answer(&mut app, ResourceKey::Grades("10".into()), grades_payload());
+        assert_eq!(app.course_grade("10").unwrap(), "A- 91.5%");
+        // The choice survives a restart, and turning it off asks for nothing.
+        let restarted = App::new(ORIGIN, Some(store));
+        assert!(restarted.show_course_grades);
+        app.update(key(KeyCode::Char(' ')));
+        let effects = app.update(key(KeyCode::Char('g')));
+        assert!(!app.show_course_grades);
+        assert!(fetches(&effects).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_hidden_course_total_is_left_out_of_the_course_list() {
+        let mut app = app_with_courses();
+        app.show_course_grades = true;
+        answer_grades_without_a_total(&mut app);
+        assert!(app.course_grade("10").is_none());
+    }
+
+    fn answer_grades_without_a_total(app: &mut App) {
+        let r = app.grades.entry("10".to_string()).or_default();
+        r.data = Some(crate::grades::Grades {
+            total: None,
+            weighted: false,
+            groups: vec![],
+            feedback: vec![],
+        });
+        r.version += 1;
     }
 }

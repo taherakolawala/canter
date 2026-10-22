@@ -10,8 +10,8 @@ use ratatui::widgets::{Cell, Paragraph, Row, Table};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::{
-    App, CourseTab, DetailRender, FileRow, Local as LocalFile, ModuleRow, Origin, Page, Resource,
-    Section, SyncState, ViewKind, human_size,
+    App, CourseTab, DetailRender, FileRow, GradeRow, Local as LocalFile, ModuleRow, Origin, Page,
+    Resource, Section, SyncState, ViewKind, human_size,
 };
 use crate::html::{self, Link, Target};
 use crate::keys;
@@ -256,7 +256,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             kind @ (ViewKind::Assignments { .. }
             | ViewKind::Files { .. }
             | ViewKind::Announcements { .. }
-            | ViewKind::Modules { .. }) => {
+            | ViewKind::Modules { .. }
+            | ViewKind::Grades { .. }) => {
                 let (tab, course_id, _) = kind.tab().expect("a course tab");
                 let course_id = course_id.to_string();
                 let [tabs, body] =
@@ -269,6 +270,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                         draw_announcements(frame, body, app, &course_id, now)
                     }
                     CourseTab::Modules => draw_modules(frame, body, app, &course_id, now),
+                    CourseTab::Grades => draw_grades(frame, body, app, &course_id, now),
                     CourseTab::Home => {} // a page, drawn below
                 }
             }
@@ -380,6 +382,14 @@ fn draw_top(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
             crumbs.push(course_name.clone());
             crumbs.push("Announcements".into());
             sync_text(app.announcements.get(course_id), app.spinner, now)
+        }
+        ViewKind::Grades {
+            course_id,
+            course_name,
+        } => {
+            crumbs.push(course_name.clone());
+            crumbs.push("Grades".into());
+            sync_text(app.grades.get(course_id), app.spinner, now)
         }
         ViewKind::Announcement {
             course_id,
@@ -976,6 +986,12 @@ fn draw_courses(frame: &mut Frame, area: Rect, app: &mut App) {
                 }),
                 Cell::from(c.course_code.clone().unwrap_or_default())
                     .style(course_style(app, &c.id)),
+                Cell::from(if app.show_course_grades {
+                    app.course_grade(&c.id).unwrap_or_default()
+                } else {
+                    String::new()
+                })
+                .style(theme::bold()),
                 Cell::from(
                     c.term
                         .as_ref()
@@ -992,11 +1008,13 @@ fn draw_courses(frame: &mut Frame, area: Rect, app: &mut App) {
         })
         .collect();
     let wide = area.width >= 90;
+    let grades = usize::from(app.show_course_grades);
     let widths = if wide {
         vec![
             Constraint::Length(1),
             Constraint::Fill(3),
             Constraint::Fill(1),
+            Constraint::Length(if grades == 1 { 12 } else { 0 }),
             Constraint::Length(18),
         ]
     } else {
@@ -1004,6 +1022,7 @@ fn draw_courses(frame: &mut Frame, area: Rect, app: &mut App) {
             Constraint::Length(1),
             Constraint::Fill(1),
             Constraint::Length(0),
+            Constraint::Length(if grades == 1 { 12 } else { 0 }),
             Constraint::Length(0),
         ]
     };
@@ -1011,6 +1030,7 @@ fn draw_courses(frame: &mut Frame, area: Rect, app: &mut App) {
         "",
         "Course",
         if wide { "Code" } else { "" },
+        if grades == 1 { "Grade" } else { "" },
         if wide { "Term" } else { "" },
     ])
     .style(theme::table_header());
@@ -1304,6 +1324,185 @@ fn draw_modules(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, n
             .header(Row::new(["Module", "Due", "Points", "Status"]).style(theme::table_header()))
             .column_spacing(1),
         area,
+    );
+}
+
+/// The Grades tab: the course total where the instructor shows it, then the
+/// assignments under their Canvas group with the group's weight.
+fn draw_grades(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, now: DateTime<Utc>) {
+    if placeholder(frame, area, app.grades.get(course_id), "grades") {
+        return;
+    }
+    let total = app
+        .grades
+        .get(course_id)
+        .and_then(|r| r.data.as_ref())
+        .map(|g| (g.total.clone(), g.weighted));
+    // One line for the course total, blank where the instructor hides it.
+    let [head, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
+    let line = match &total {
+        Some((Some(t), weighted)) => {
+            let mut spans = vec![Span::styled("Total  ", theme::muted())];
+            if let Some(grade) = &t.grade {
+                spans.push(Span::styled(grade.clone(), theme::bold()));
+                spans.push(Span::raw("  "));
+            }
+            if let Some(score) = t.score {
+                spans.push(Span::styled(crate::app::percent(score), theme::bold()));
+            }
+            if *weighted {
+                spans.push(Span::styled("   groups are weighted", theme::faint()));
+            }
+            Line::from(spans)
+        }
+        Some((None, _)) => Line::styled(
+            "The instructor does not show the course total here.",
+            theme::muted(),
+        ),
+        None => Line::raw(""),
+    };
+    frame.render_widget(Paragraph::new(vec![line, Line::raw("")]), head);
+
+    let rows = app.visible_rows();
+    if rows.is_empty() {
+        let bare = app
+            .grades
+            .get(course_id)
+            .and_then(|r| r.data.as_ref())
+            .is_some_and(|g| g.is_empty());
+        if bare && app.view().filter.is_empty() {
+            frame.render_widget(
+                Paragraph::new("This course has no graded work.")
+                    .style(theme::muted())
+                    .alignment(Alignment::Center),
+                Rect {
+                    y: body.y + body.height / 3,
+                    height: 1,
+                    ..body
+                },
+            );
+        } else {
+            empty_message(frame, body, &app.view().filter, "graded work");
+        }
+        return;
+    }
+    let (start, end) = window(app, rows.len(), usize::from(body.height.saturating_sub(1)));
+    let selected = app.view().selected;
+    let all = app.grade_rows(course_id);
+    let marks: Vec<bool> = rows[start..end]
+        .iter()
+        .map(|&index| match all[index] {
+            GradeRow::Assignment(_, a) => app.unseen_feedback(course_id, &a.id),
+            GradeRow::Group(_) => false,
+        })
+        .collect();
+    let wide = body.width >= 80;
+    let built: Vec<Row> = rows[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, &index)| {
+            let row = match all[index] {
+                GradeRow::Group(g) => {
+                    let mut name = html::sanitize(g.name());
+                    if let Some(weight) = g.group_weight.filter(|w| *w > 0.0) {
+                        name.push_str(&format!("  ({} of the total)", crate::app::percent(weight)));
+                    }
+                    let score = g
+                        .earned()
+                        .map(|(score, possible)| {
+                            format!(
+                                "{} / {}",
+                                crate::app::points(score),
+                                crate::app::points(possible)
+                            )
+                        })
+                        .unwrap_or_default();
+                    Row::new(vec![
+                        Cell::from(Line::styled(name, theme::heading())),
+                        Cell::from(""),
+                        Cell::from(Line::styled(score, theme::heading())),
+                        Cell::from(""),
+                    ])
+                }
+                GradeRow::Assignment(_, a) => {
+                    let submission = a.submission.as_ref();
+                    // What the row says in the score column: the score out of
+                    // the points, or why there is no score.
+                    let score = match submission {
+                        Some(s) if s.excused == Some(true) => "Excused".to_string(),
+                        Some(s) => match (s.score, a.points_possible) {
+                            (Some(score), Some(possible)) => format!(
+                                "{} / {}",
+                                crate::app::points(score),
+                                crate::app::points(possible)
+                            ),
+                            (Some(score), None) => crate::app::points(score),
+                            (None, Some(possible)) => {
+                                format!("-- / {}", crate::app::points(possible))
+                            }
+                            (None, None) => String::new(),
+                        },
+                        None => a
+                            .points_possible
+                            .map(|p| format!("-- / {}", crate::app::points(p)))
+                            .unwrap_or_default(),
+                    };
+                    let graded = submission.is_some_and(|s| s.score.is_some());
+                    let (state, style) = match submission {
+                        Some(s) if s.excused == Some(true) => (String::new(), theme::muted()),
+                        Some(s) if s.missing == Some(true) => {
+                            ("Missing".to_string(), theme::tone(Tone::Bad))
+                        }
+                        Some(s) if s.late == Some(true) => {
+                            ("Late".to_string(), theme::tone(Tone::Warn))
+                        }
+                        Some(s) if s.score.is_some() => {
+                            ("Graded".to_string(), theme::tone(Tone::Good))
+                        }
+                        Some(s) if s.submitted_at.is_some() => {
+                            ("Submitted".to_string(), theme::tone(Tone::Info))
+                        }
+                        _ => (String::new(), theme::muted()),
+                    };
+                    let mark = if marks[i] { "* " } else { "  " };
+                    Row::new(vec![
+                        Cell::from(Line::from(vec![
+                            Span::styled(mark, theme::tone(Tone::Info)),
+                            Span::raw(html::sanitize(a.title())),
+                        ])),
+                        Cell::from(a.due_at.map(|d| short_date(d, now)).unwrap_or_default())
+                            .style(theme::due(a.due_at, graded, now)),
+                        Cell::from(score),
+                        Cell::from(state).style(style),
+                    ])
+                }
+            };
+            if start + i == selected {
+                row.style(theme::selected())
+            } else {
+                row
+            }
+        })
+        .collect();
+    let widths = [
+        Constraint::Fill(1),
+        Constraint::Length(if wide { 20 } else { 0 }),
+        Constraint::Length(14),
+        Constraint::Length(if wide { 10 } else { 0 }),
+    ];
+    frame.render_widget(
+        Table::new(built, widths)
+            .header(
+                Row::new([
+                    "Assignment",
+                    if wide { "Due" } else { "" },
+                    "Score",
+                    if wide { "Status" } else { "" },
+                ])
+                .style(theme::table_header()),
+            )
+            .column_spacing(1),
+        body,
     );
 }
 
@@ -2493,7 +2692,8 @@ mod tests {
         );
         let effects = send(&mut app, KeyCode::Enter);
         deliver(&mut app, effects, Payload::Assignments(vec![]));
-        send(&mut app, KeyCode::BackTab); // Modules, last before Canvas's tabs are known
+        send(&mut app, KeyCode::BackTab); // Grades, last before Canvas's tabs are known
+        send(&mut app, KeyCode::BackTab); // Modules
         let effects = send(&mut app, KeyCode::BackTab);
         let base = crate::announcements::Summary {
             id: "7".into(),
@@ -3163,6 +3363,102 @@ mod tests {
         // Narrow terminal still renders.
         let s = screen(&mut app, 40, 10);
         assert!(s.lines().count() == 10);
+    }
+
+    #[test]
+    fn grades_render_total_groups_weights_and_the_feedback_mark() {
+        let mut app = App::new("https://ufl.instructure.com", None);
+        let send =
+            |app: &mut App, code| app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        let effects = app.start();
+        deliver(
+            &mut app,
+            effects,
+            Payload::Courses(vec![Course {
+                id: "1".into(),
+                name: Some("Course".into()),
+                ..Default::default()
+            }]),
+        );
+        let effects = send(&mut app, KeyCode::Enter);
+        deliver(&mut app, effects, Payload::Assignments(vec![]));
+        // Grades is last in the cycle before Canvas's tab list arrives.
+        let effects = send(&mut app, KeyCode::BackTab);
+        let graded = |id: &str, name: &str, score: Option<f64>, missing: bool| AssignmentSummary {
+            id: id.into(),
+            name: Some(name.into()),
+            points_possible: Some(10.0),
+            submission: Some(crate::model::Submission {
+                score,
+                missing: Some(missing),
+                workflow_state: Some("graded".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        deliver(
+            &mut app,
+            effects,
+            Payload::Grades(Box::new(crate::grades::Grades {
+                total: Some(crate::grades::Total {
+                    score: Some(91.5),
+                    grade: Some("A-".into()),
+                }),
+                weighted: true,
+                groups: vec![crate::grades::Group {
+                    id: "100".into(),
+                    name: Some("Homework".into()),
+                    group_weight: Some(40.0),
+                    assignments: vec![
+                        graded("1", "Lab one", Some(9.0), false),
+                        graded("2", "Lab two", None, true),
+                    ],
+                    ..Default::default()
+                }],
+                feedback: vec![crate::grades::Feedback {
+                    assignment_id: "1".into(),
+                    count: 1,
+                    latest: Some(Utc::now()),
+                }],
+            })),
+        );
+        let rendered = screen(&mut app, 100, 16);
+        println!("{rendered}\n");
+        assert!(
+            rendered.contains("Total") && rendered.contains("A-") && rendered.contains("91.5%")
+        );
+        assert!(rendered.contains("groups are weighted"));
+        assert!(rendered.contains("Homework") && rendered.contains("(40% of the total)"));
+        assert!(rendered.contains("9 / 10") && rendered.contains("-- / 10"));
+        assert!(rendered.contains("Missing"));
+        // The unseen instructor comment marks its row, and only that row.
+        let marked: Vec<&str> = rendered
+            .lines()
+            .filter(|l| l.trim_start().starts_with("* "))
+            .collect();
+        assert_eq!(marked.len(), 1);
+        assert!(marked[0].contains("Lab one"));
+    }
+
+    #[test]
+    fn a_hidden_course_total_says_so_rather_than_showing_nothing() {
+        let mut app = App::new("https://ufl.instructure.com", None);
+        app.stack = vec![crate::app::View::new(ViewKind::Grades {
+            course_id: "1".into(),
+            course_name: "Course".into(),
+        })];
+        let r = app.grades.entry("1".to_string()).or_default();
+        r.data = Some(crate::grades::Grades {
+            total: None,
+            weighted: false,
+            groups: vec![],
+            feedback: vec![],
+        });
+        r.version += 1;
+        let rendered = screen(&mut app, 100, 12);
+        println!("{rendered}\n");
+        assert!(rendered.contains("does not show the course total"));
+        assert!(rendered.contains("no graded work"));
     }
 }
 
