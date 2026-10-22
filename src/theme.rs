@@ -18,7 +18,7 @@ pub const MUTED: Color = Color::Rgb(155, 155, 165);
 pub const FAINT: Color = Color::Rgb(105, 105, 118);
 pub const SELECT_BG: Color = Color::Rgb(34, 46, 82);
 
-fn plain() -> bool {
+pub fn plain() -> bool {
     static PLAIN: OnceLock<bool> = OnceLock::new();
     *PLAIN.get_or_init(|| std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()))
 }

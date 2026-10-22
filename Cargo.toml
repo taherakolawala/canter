@@ -10,6 +10,10 @@ publish = false
 chrono = { version = "0.4.45", features = ["serde"] }
 cookie = "0.18.2"
 html2text = "0.17.3"
+# Decoding only, for images drawn in page text: PNG, JPEG and GIF cover every
+# embedded image Canvas serves here. Default features would add a dozen more
+# formats and their decoders.
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif"] }
 open = "5.4.4"
 ratatui = "0.30.2"
 reqwest = { version = "0.13.5", default-features = false, features = ["native-tls", "http2", "gzip", "charset", "json", "system-proxy", "query"] }
