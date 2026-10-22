@@ -16,7 +16,7 @@ use crate::keys::{self, Act, Scope};
 use crate::library::{self, Library, LocalState};
 use crate::model::{AssignmentDetail, AssignmentSummary, CanvasFile, CanvasFolder, Course};
 use crate::modules::ItemKind;
-use crate::submission::{self, FileChoice};
+use crate::submission::{self, DraftKind, FileChoice};
 
 /// An in-flight read that started at most this long before an access may
 /// satisfy that access (approved freshness rule). Older ones may not.
@@ -321,6 +321,13 @@ pub enum Effect {
         assignment_id: String,
         files: Vec<FileChoice>,
     },
+    /// Hand in typed text or a website address, after the review screen.
+    SubmitContent {
+        course_id: String,
+        assignment_id: String,
+        kind: DraftKind,
+        content: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -331,6 +338,14 @@ pub struct SubmissionDraft {
     pub files: Vec<FileChoice>,
     pub reviewing: bool,
     pub busy: bool,
+    /// What this draft hands in. Files, text and a URL share this screen.
+    pub kind: DraftKind,
+    /// The text or address that will be sent, exactly as reviewed.
+    pub content: String,
+    /// The path box is open to read the text from a file.
+    pub from_file: bool,
+    /// Where the text was read from, when it came from a file.
+    pub source: Option<PathBuf>,
 }
 
 /// What has focus on an assignment or announcement page.
@@ -340,10 +355,21 @@ pub enum Section {
     Text,
     Links,
     Submissions,
+    /// The instructor's feedback on the selected attempt.
+    Feedback,
     /// The month grid on the course list (a day is selected).
     Calendar,
     /// The selected day's entries, listed under the grid.
     Day,
+}
+
+/// One selectable entry of an assignment's feedback section.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FeedbackEntry {
+    /// An instructor comment on the selected attempt.
+    Comment(usize),
+    /// One scored criterion of the assignment's rubric.
+    Criterion(usize),
 }
 
 /// The actions menu (`Space`).
@@ -509,6 +535,8 @@ pub struct View {
     pub link: usize,
     /// Selected attempt in an assignment's submissions (0 = latest).
     pub attempt: usize,
+    /// Selected entry in the feedback for that attempt.
+    pub feedback: usize,
     /// Bring the focused section into view on the next draw.
     pub reveal: bool,
 }
@@ -525,6 +553,7 @@ impl View {
             focus: Section::Text,
             link: 0,
             attempt: 0,
+            feedback: 0,
             reveal: false,
         }
     }
@@ -2402,7 +2431,7 @@ impl App {
         (queued, running)
     }
 
-    fn start_submission(&mut self, course: &str, assignment: &str) -> Vec<Effect> {
+    fn start_submission(&mut self, course: &str, assignment: &str, kind: DraftKind) -> Vec<Effect> {
         let Some(resource) = self
             .details
             .get(&(course.to_string(), assignment.to_string()))
@@ -2431,20 +2460,30 @@ impl App {
         let Some(detail) = &resource.data else {
             return vec![];
         };
-        if let Err(reason) = submission::eligible(detail, Utc::now()) {
+        if let Err(reason) = submission::eligible_for(detail, Utc::now(), kind) {
             self.notice = Some(reason);
             return vec![];
         }
         let start_directory = submission::starting_directory();
         let mut suggestions = submission::PathSuggestions::default();
-        suggestions.update(&start_directory);
+        // The path box starts in the user's folder; the text box starts empty.
+        let input = if kind == DraftKind::Files {
+            suggestions.update(&start_directory);
+            start_directory.clone()
+        } else {
+            String::new()
+        };
         self.submission = Some(SubmissionDraft {
-            input: start_directory.clone(),
+            input,
             start_directory,
             suggestions,
             files: Vec::new(),
             reviewing: false,
             busy: false,
+            kind,
+            content: String::new(),
+            from_file: false,
+            source: None,
         });
         vec![]
     }
@@ -2477,8 +2516,10 @@ impl App {
                 vec![]
             } else if draft.reviewing {
                 vec![Scope::Review]
-            } else {
+            } else if draft.kind == DraftKind::Files || draft.from_file {
                 vec![Scope::PathInput]
+            } else {
+                vec![Scope::TextInput]
             };
         }
         let view = self.view();
@@ -2521,11 +2562,114 @@ impl App {
                 match self.focus() {
                     Section::Links => scopes.push(Scope::Links),
                     Section::Submissions => scopes.push(Scope::Submissions),
+                    Section::Feedback => scopes.push(Scope::Feedback),
                     Section::Text | Section::Calendar | Section::Day => {}
                 }
             }
         }
         scopes
+    }
+
+    /// The instructor's feedback on one attempt: the comments Canvas tagged
+    /// with that attempt (and, on the latest, the untagged ones).
+    pub fn attempt_comments(
+        &self,
+        course_id: &str,
+        assignment_id: &str,
+        attempt: usize,
+    ) -> Vec<&submission::Comment> {
+        let Some(history) = self
+            .histories
+            .get(&(course_id.to_string(), assignment_id.to_string()))
+            .and_then(|r| r.data.as_ref())
+        else {
+            return vec![];
+        };
+        let Some(entry) = history.attempts.get(attempt) else {
+            return vec![];
+        };
+        history.comments_for(entry.attempt, attempt == 0)
+    }
+
+    /// The rubric criteria the instructor scored, with the score. Canvas keeps
+    /// one rubric assessment per submission, so it is shown with the latest
+    /// attempt only.
+    pub fn rubric_scores(
+        &self,
+        course_id: &str,
+        assignment_id: &str,
+        attempt: usize,
+    ) -> Vec<(&crate::model::RubricCriterion, &submission::CriterionScore)> {
+        if attempt != 0 {
+            return vec![];
+        }
+        let key = (course_id.to_string(), assignment_id.to_string());
+        let Some(history) = self.histories.get(&key).and_then(|r| r.data.as_ref()) else {
+            return vec![];
+        };
+        let Some(detail) = self.details.get(&key).and_then(|r| r.data.as_ref()) else {
+            return vec![];
+        };
+        detail
+            .rubric
+            .iter()
+            .filter_map(|c| {
+                let score = history.rubric.get(c.id.as_deref()?)?;
+                Some((c, score))
+            })
+            .collect()
+    }
+
+    /// The feedback section's selectable entries, in the order they are drawn.
+    pub fn feedback_entries(
+        &self,
+        course_id: &str,
+        assignment_id: &str,
+        attempt: usize,
+    ) -> Vec<FeedbackEntry> {
+        let comments = self
+            .attempt_comments(course_id, assignment_id, attempt)
+            .len();
+        let criteria = self.rubric_scores(course_id, assignment_id, attempt).len();
+        (0..comments)
+            .map(FeedbackEntry::Comment)
+            .chain((0..criteria).map(FeedbackEntry::Criterion))
+            .collect()
+    }
+
+    /// Whether the selected attempt has feedback to show at all.
+    fn has_feedback(&self, course_id: &str, assignment_id: &str, attempt: usize) -> bool {
+        !self
+            .feedback_entries(course_id, assignment_id, attempt)
+            .is_empty()
+    }
+
+    /// Where the files attached to instructor comments are kept:
+    /// `Assignment Files\<assignment>\Feedback`.
+    pub fn feedback_dir(&self, course_id: &str, assignment_id: &str) -> Option<PathBuf> {
+        Some(self.detail_dir(course_id, assignment_id)?.join("Feedback"))
+    }
+
+    /// The instructor's comments for the selected attempt are on screen, so
+    /// they count as read. This is the single place the Grades tab's local
+    /// seen-store should be told: wire `mark_feedback_seen` in here.
+    /// Returns the assignment when this run had not recorded it yet.
+    /// Reading an assignment's feedback is what marks its instructor comments
+    /// seen, which clears the mark the Grades tab puts on its row. The record
+    /// is local, so Canvas is never told what has been read.
+    fn note_feedback_read(&mut self) {
+        let ViewKind::Detail {
+            course_id,
+            assignment_id,
+            ..
+        } = self.view().kind.clone()
+        else {
+            return;
+        };
+        if !self.has_feedback(&course_id, &assignment_id, self.view().attempt) {
+            return;
+        }
+        self.mark_feedback_seen(&course_id, &assignment_id);
     }
 
     /// Sections the current page has, in order: text, files & links, submissions.
@@ -2544,6 +2688,9 @@ impl App {
             && self.attempt_count(c, a) > 0
         {
             out.push(Section::Submissions);
+            if self.has_feedback(c, a, self.view().attempt) {
+                out.push(Section::Feedback);
+            }
         }
         out
     }
@@ -2614,12 +2761,21 @@ impl App {
         let page = self.view().kind.page();
         match act {
             Act::Open => match (page, self.focus()) {
+                (Some(Page::Assignment(c, a)), Section::Feedback) => self
+                    .selected_feedback(&c, &a)
+                    .is_some_and(|e| matches!(e, FeedbackEntry::Comment(_))),
                 (Some(_), focus) => focus == Section::Links,
                 (None, Section::Calendar | Section::Day) => {
                     !self.day_items(self.calendar_day).is_empty()
                 }
                 (None, _) => !self.visible_rows().is_empty(),
             },
+            Act::Download if self.focus() == Section::Feedback => {
+                !self.selected_feedback_files().is_empty()
+            }
+            Act::DownloadAll if self.focus() == Section::Feedback => {
+                !self.feedback_files().is_empty()
+            }
             Act::Download => match self.view().kind {
                 ViewKind::Files { .. } => !self.file_rows().is_empty(),
                 ViewKind::Modules { .. } => matches!(
@@ -2643,18 +2799,9 @@ impl App {
                     .any(|l| matches!(l.target, Target::File { .. })),
             },
             Act::ShowFolder | Act::OpenLibrary => self.library.is_some(),
-            Act::Submit => match &self.view().kind {
-                ViewKind::Detail {
-                    course_id,
-                    assignment_id,
-                    ..
-                } => self
-                    .details
-                    .get(&(course_id.clone(), assignment_id.clone()))
-                    .and_then(|r| r.data.as_ref())
-                    .is_some_and(|d| d.base.submission_types.iter().any(|t| t == "online_upload")),
-                _ => false,
-            },
+            Act::Submit => self.accepts(DraftKind::Files),
+            Act::SubmitText => self.accepts(DraftKind::Text),
+            Act::SubmitUrl => self.accepts(DraftKind::Url),
             Act::NextSection | Act::PrevSection => match self.view().kind.tab() {
                 Some((_, course_id, _)) => self.course_tabs(course_id).len() > 1,
                 None => self.sections().len() > 1,
@@ -2663,6 +2810,107 @@ impl App {
             Act::Search => self.is_list(),
             _ => true,
         }
+    }
+
+    /// Whether this assignment lists a submission type the reader can send.
+    fn accepts(&self, kind: DraftKind) -> bool {
+        match &self.view().kind {
+            ViewKind::Detail {
+                course_id,
+                assignment_id,
+                ..
+            } => self
+                .details
+                .get(&(course_id.clone(), assignment_id.clone()))
+                .and_then(|r| r.data.as_ref())
+                .is_some_and(|d| {
+                    d.base
+                        .submission_types
+                        .iter()
+                        .any(|t| t == kind.canvas_type())
+                }),
+            _ => false,
+        }
+    }
+
+    /// The feedback entry the cursor is on.
+    pub fn selected_feedback(&self, course_id: &str, assignment_id: &str) -> Option<FeedbackEntry> {
+        self.feedback_entries(course_id, assignment_id, self.view().attempt)
+            .get(self.view().feedback)
+            .copied()
+    }
+
+    /// Canvas ids of the files attached to the selected comment.
+    fn selected_feedback_files(&self) -> Vec<String> {
+        let Some(Page::Assignment(c, a)) = self.view().kind.page() else {
+            return vec![];
+        };
+        match self.selected_feedback(&c, &a) {
+            Some(FeedbackEntry::Comment(i)) => self
+                .attempt_comments(&c, &a, self.view().attempt)
+                .get(i)
+                .map(|comment| comment.files().map(|f| f.id.clone()).collect())
+                .unwrap_or_default(),
+            _ => vec![],
+        }
+    }
+
+    /// Canvas ids of every file attached to the feedback on this attempt.
+    fn feedback_files(&self) -> Vec<String> {
+        let Some(Page::Assignment(c, a)) = self.view().kind.page() else {
+            return vec![];
+        };
+        let mut ids: Vec<String> = Vec::new();
+        for comment in self.attempt_comments(&c, &a, self.view().attempt) {
+            for file in comment.files() {
+                if !ids.contains(&file.id) {
+                    ids.push(file.id.clone());
+                }
+            }
+        }
+        ids
+    }
+
+    /// Why the selected feedback row has nothing to open or download.
+    fn no_feedback_files(&self) -> String {
+        let criterion = match self.view().kind.page() {
+            Some(Page::Assignment(c, a)) => matches!(
+                self.selected_feedback(&c, &a),
+                Some(FeedbackEntry::Criterion(_))
+            ),
+            _ => false,
+        };
+        if criterion {
+            "A rubric score has no files. Press o to open the submission.".into()
+        } else {
+            "No file is attached to this comment. Press o to open the submission.".into()
+        }
+    }
+
+    /// Put a comment's files in the assignment's `Feedback` folder. Their
+    /// metadata arrives inside the comment, so it is read again before use,
+    /// as announcement attachments are.
+    fn place_feedback_files(&mut self, ids: Vec<String>, open: bool) -> Vec<Effect> {
+        let Some(Page::Assignment(course_id, assignment_id)) = self.view().kind.page() else {
+            return vec![];
+        };
+        let dir = self.feedback_dir(&course_id, &assignment_id);
+        if dir.is_none() {
+            self.notice = Some("The file library is unavailable.".into());
+            return vec![];
+        }
+        let single = ids.len() == 1;
+        let mut effects = Vec::new();
+        for id in &ids {
+            effects.extend(self.place_announcement_file(id, dir.clone(), open && single));
+        }
+        if !single {
+            self.notice = Some(format!(
+                "Checking {} feedback files before downloading…",
+                ids.len()
+            ));
+        }
+        effects
     }
 
     /// The actions menu's entries for the screen under it, filtered by its search.
@@ -2758,17 +3006,25 @@ impl App {
             return;
         }
         if let Some(draft) = &mut self.submission {
+            let typing_text = draft.kind != DraftKind::Files && !draft.from_file;
+            let limit = match (typing_text, draft.kind) {
+                (true, DraftKind::Text) => submission::MAX_TEXT,
+                (true, DraftKind::Url) => submission::MAX_URL,
+                _ => 1024,
+            };
             // A held Backspace would wipe the path; one character per press.
-            if erase && key.kind != KeyEventKind::Repeat {
+            if erase && (typing_text || key.kind != KeyEventKind::Repeat) {
                 draft.input.pop();
             } else if let Some(c) = typed
-                && draft.input.chars().count() < 1024
+                && draft.input.chars().count() < limit
             {
                 draft.input.push(c);
             } else {
                 return;
             }
-            draft.suggestions.update(&draft.input);
+            if !typing_text {
+                draft.suggestions.update(&draft.input);
+            }
             return;
         }
         let view = self.view_mut();
@@ -2813,6 +3069,14 @@ impl App {
             | Act::PageDown
             | Act::Top
             | Act::Bottom => self.navigate(act),
+            Act::Open if self.focus() == Section::Feedback => {
+                let files = self.selected_feedback_files();
+                if files.is_empty() {
+                    self.notice = Some(self.no_feedback_files());
+                    return vec![];
+                }
+                self.place_feedback_files(files, true)
+            }
             Act::Open => match &page {
                 Some(page) => self.open_link(page),
                 None => self.open_selected(),
@@ -2850,14 +3114,21 @@ impl App {
             Act::Download => self.download_selected(),
             Act::DownloadAll => self.download_everything(),
             Act::ShowFolder => self.show_folder(),
-            Act::Submit => match self.view().kind.clone() {
-                ViewKind::Detail {
-                    course_id,
-                    assignment_id,
-                    ..
-                } => self.start_submission(&course_id, &assignment_id),
-                _ => vec![],
-            },
+            Act::Submit | Act::SubmitText | Act::SubmitUrl => {
+                let kind = match act {
+                    Act::SubmitText => DraftKind::Text,
+                    Act::SubmitUrl => DraftKind::Url,
+                    _ => DraftKind::Files,
+                };
+                match self.view().kind.clone() {
+                    ViewKind::Detail {
+                        course_id,
+                        assignment_id,
+                        ..
+                    } => self.start_submission(&course_id, &assignment_id, kind),
+                    _ => vec![],
+                }
+            }
             Act::JumpToLink => {
                 if let KeyCode::Char(c) = key.code
                     && let Some(n) = c.to_digit(10)
@@ -2890,6 +3161,7 @@ impl App {
             | Act::InputCancel
             | Act::InputComplete
             | Act::InputClear
+            | Act::LoadTextFile
             | Act::Confirm => vec![],
         }
     }
@@ -2978,10 +3250,18 @@ impl App {
                     } = &kind
                     {
                         draft.busy = true;
-                        return vec![Effect::Submit {
-                            course_id: course_id.clone(),
-                            assignment_id: assignment_id.clone(),
-                            files: draft.files.clone(),
+                        return vec![match draft.kind {
+                            DraftKind::Files => Effect::Submit {
+                                course_id: course_id.clone(),
+                                assignment_id: assignment_id.clone(),
+                                files: draft.files.clone(),
+                            },
+                            kind => Effect::SubmitContent {
+                                course_id: course_id.clone(),
+                                assignment_id: assignment_id.clone(),
+                                kind,
+                                content: draft.content.clone(),
+                            },
                         }];
                     }
                 }
@@ -2989,7 +3269,39 @@ impl App {
             }
             return vec![];
         }
+        if draft.kind != DraftKind::Files && !draft.from_file {
+            match act {
+                Act::InputCancel => self.submission = None,
+                Act::InputClear => draft.input.clear(),
+                Act::LoadTextFile if draft.kind == DraftKind::Text => {
+                    draft.from_file = true;
+                    draft.input = draft.start_directory.clone();
+                    draft.suggestions.update(&draft.input);
+                }
+                Act::InputDone => {
+                    let chosen = match draft.kind {
+                        DraftKind::Url => submission::choose_url(&draft.input),
+                        _ => submission::choose_text(&draft.input),
+                    };
+                    match chosen {
+                        Ok(content) => {
+                            draft.content = content;
+                            draft.source = None;
+                            draft.reviewing = true;
+                        }
+                        Err(reason) => self.notice = Some(reason),
+                    }
+                }
+                _ => {}
+            }
+            return vec![];
+        }
         match act {
+            Act::InputCancel if draft.from_file => {
+                // Back to typing rather than out of the draft.
+                draft.from_file = false;
+                draft.input = draft.content.clone();
+            }
             Act::InputCancel => self.submission = None,
             Act::InputClear => {
                 draft.input.clear();
@@ -3003,6 +3315,15 @@ impl App {
                     draft.suggestions.update(&draft.input);
                 }
             }
+            Act::InputDone if draft.from_file => match submission::read_text_file(&draft.input) {
+                Ok((text, path)) => {
+                    draft.content = text;
+                    draft.source = Some(path);
+                    draft.from_file = false;
+                    draft.reviewing = true;
+                }
+                Err(reason) => self.notice = Some(reason),
+            },
             Act::InputDone => {
                 if draft.input.trim().is_empty() || draft.input == draft.start_directory {
                     if draft.files.is_empty() {
@@ -3066,6 +3387,9 @@ impl App {
         let count = match (self.focus(), self.view().kind.page()) {
             (Section::Links, _) => self.current_links().len(),
             (Section::Submissions, Some(Page::Assignment(c, a))) => self.attempt_count(&c, &a),
+            (Section::Feedback, Some(Page::Assignment(c, a))) => {
+                self.feedback_entries(&c, &a, self.view().attempt).len()
+            }
             _ => 0,
         };
         let focus = self.focus();
@@ -3075,7 +3399,14 @@ impl App {
         match focus {
             Section::Text => view.scroll = (view.scroll as isize + delta).max(0) as usize,
             Section::Links => view.link = step(view.link),
-            Section::Submissions => view.attempt = step(view.attempt),
+            Section::Submissions => {
+                let next = step(view.attempt);
+                if next != view.attempt {
+                    view.attempt = next;
+                    view.feedback = 0;
+                }
+            }
+            Section::Feedback => view.feedback = step(view.feedback),
             Section::Calendar | Section::Day => {}
         }
         vec![]
@@ -3134,11 +3465,23 @@ impl App {
             (at + n - 1) % n
         }];
         let links = self.current_links().len();
+        let entries = match self.view().kind.page() {
+            Some(Page::Assignment(c, a)) => {
+                self.feedback_entries(&c, &a, self.view().attempt).len()
+            }
+            _ => 0,
+        };
         let view = self.view_mut();
         view.focus = next;
         view.reveal = next != Section::Text;
         if view.link >= links {
             view.link = 0;
+        }
+        if view.feedback >= entries {
+            view.feedback = 0;
+        }
+        if next == Section::Feedback {
+            self.note_feedback_read();
         }
     }
 
@@ -3335,6 +3678,14 @@ impl App {
 
     /// `d`: download the selected file (or, in Files, folder).
     fn download_selected(&mut self) -> Vec<Effect> {
+        if self.focus() == Section::Feedback {
+            let files = self.selected_feedback_files();
+            if files.is_empty() {
+                self.notice = Some(self.no_feedback_files());
+                return vec![];
+            }
+            return self.place_feedback_files(files, false);
+        }
         if let ViewKind::Files {
             course_id,
             course_name,
@@ -3398,6 +3749,14 @@ impl App {
 
     /// `D`: download every file in this folder, or every file of this page.
     fn download_everything(&mut self) -> Vec<Effect> {
+        if self.focus() == Section::Feedback {
+            let files = self.feedback_files();
+            if files.is_empty() {
+                self.notice = Some("This feedback has no files.".into());
+                return vec![];
+            }
+            return self.place_feedback_files(files, false);
+        }
         if let ViewKind::Files {
             course_id,
             course_name,
@@ -4139,6 +4498,17 @@ impl App {
                 ))
             }
 
+            // The attempts and the feedback are about the submission, so the
+            // browser opens that page: it is where Canvas shows media comments
+            // and feedback drawn on a submitted document.
+            ViewKind::Detail {
+                course_id,
+                assignment_id,
+                ..
+            } if matches!(self.focus(), Section::Submissions | Section::Feedback) => Some(format!(
+                "{}/courses/{course_id}/assignments/{assignment_id}/submissions/self",
+                self.origin
+            )),
             ViewKind::Detail {
                 course_id,
                 assignment_id,
@@ -5999,5 +6369,327 @@ mod tests {
             crate::app::Origin::Cache
         ));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    const FEEDBACK: &str = r#"{
+        "attempt": 2, "submitted_at": "2026-10-22T12:00:00Z", "workflow_state": "graded",
+        "submission_history": [
+            {"attempt": 1, "submitted_at": "2026-10-20T12:00:00Z", "submission_type": "online_upload"},
+            {"attempt": 2, "submitted_at": "2026-10-22T12:00:00Z", "submission_type": "online_upload",
+             "attachments": [{"id": 90, "display_name": "final.pdf", "size": 20, "canvadoc_document_id": 7}]}
+        ],
+        "submission_comments": [
+            {"id": 41, "author_name": "Dr Lee", "created_at": "2026-10-21T09:00:00Z",
+             "comment": "Fix the first proof.", "attempt": 1},
+            {"id": 42, "author_name": "Dr Lee", "created_at": "2026-10-23T09:00:00Z",
+             "comment": "Much better.", "attempt": 2,
+             "attachments": [{"id": 77, "display_name": "marked.pdf", "size": 400,
+                              "updated_at": "2026-10-23T09:00:00Z"}]},
+            {"id": 43, "author_name": "Dr Lee", "created_at": "2026-10-23T10:00:00Z", "comment": ""}
+        ],
+        "rubric_assessment": {"_1": {"points": 4.0, "comments": "Clear."}, "_2": {"points": 2.0}}
+    }"#;
+
+    /// An assignment with a rubric, two attempts and the instructor's feedback.
+    fn feedback_app(library: Option<Arc<Library>>) -> App {
+        let mut app = app_with_courses();
+        app.library = library;
+        let (k, r) = fetch_of(&app.update(key(KeyCode::Enter)));
+        let base = AssignmentSummary {
+            id: "7".into(),
+            name: Some("Lab-2".into()),
+            submission_types: vec!["online_upload".into()],
+            submission: Some(crate::model::Submission {
+                submitted_at: Some(Utc::now()),
+                attempt: Some(2),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        deliver(&mut app, k, r, Payload::Assignments(vec![base.clone()]));
+        let (k, r) = fetch_of(&app.update(key(KeyCode::Enter)));
+        let detail = AssignmentDetail {
+            base,
+            rubric: vec![
+                crate::model::RubricCriterion {
+                    id: Some("_1".into()),
+                    description: Some("Correctness".into()),
+                    points: Some(5.0),
+                    ..Default::default()
+                },
+                crate::model::RubricCriterion {
+                    id: Some("_2".into()),
+                    description: Some("Write-up".into()),
+                    points: Some(3.0),
+                    ..Default::default()
+                },
+            ],
+            rubric_settings: Some(crate::model::RubricSettings {
+                title: Some("Lab rubric".into()),
+                points_possible: Some(8.0),
+            }),
+            ..Default::default()
+        };
+        let effects = app.update(Msg::Fetched {
+            key: k,
+            request: r,
+            result: Ok((Payload::Detail(Box::new(detail)), FetchStats::default())),
+            at: Utc::now(),
+        });
+        let history = submission::History::parse(serde_json::from_str(FEEDBACK).unwrap()).unwrap();
+        let (k, r) = fetch_of(&effects);
+        assert_eq!(k, ResourceKey::History("10".into(), "7".into()));
+        deliver(&mut app, k, r, Payload::History(history));
+        app.notice = None;
+        app
+    }
+
+    #[test]
+    fn feedback_is_a_section_of_the_assignment_page_shown_per_attempt() {
+        let mut app = feedback_app(None);
+        assert_eq!(
+            app.sections(),
+            vec![Section::Text, Section::Submissions, Section::Feedback]
+        );
+        // Tab, Tab reaches the feedback for the latest attempt.
+        app.update(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Section::Submissions);
+        app.update(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Section::Feedback);
+        assert!(app.scopes().contains(&Scope::Feedback));
+        // The latest attempt shows its own comment, the untagged one, and the
+        // two scored rubric criteria.
+        let comments = app.attempt_comments("10", "7", 0);
+        assert_eq!(
+            comments
+                .iter()
+                .filter_map(|c| c.id.clone())
+                .collect::<Vec<_>>(),
+            ["42", "43"]
+        );
+        assert_eq!(
+            app.feedback_entries("10", "7", 0),
+            [
+                FeedbackEntry::Comment(0),
+                FeedbackEntry::Comment(1),
+                FeedbackEntry::Criterion(0),
+                FeedbackEntry::Criterion(1)
+            ]
+        );
+        let scores = app.rubric_scores("10", "7", 0);
+        assert_eq!(scores[0].0.title(), "Correctness");
+        assert_eq!(scores[0].1.points, Some(4.0));
+        // Reading it tells the Grades tab's seen-store, so the row loses its
+        // mark; the store is local and Canvas is never told.
+        assert!(!app.unseen_feedback("10", "7"));
+        // A comment Canvas keeps no text for says where to read it.
+        assert_eq!(
+            comments[1].browser_only(),
+            Some(crate::submission::BrowserOnly::Annotation)
+        );
+        // `o` opens the submission itself, which is where Canvas shows those.
+        assert_eq!(
+            app.browser_url().unwrap(),
+            format!("{ORIGIN}/courses/10/assignments/7/submissions/self")
+        );
+        // The arrows move through the comments and then the criteria.
+        app.update(key(KeyCode::Down));
+        app.update(key(KeyCode::Down));
+        assert_eq!(app.view().feedback, 2);
+        for _ in 0..5 {
+            app.update(key(KeyCode::Down));
+        }
+        assert_eq!(app.view().feedback, 3, "stays on the last entry");
+        // Esc returns to the text, as in every other section.
+        app.update(key(KeyCode::Esc));
+        assert_eq!(app.focus(), Section::Text);
+
+        // The earlier attempt has its own comment and no rubric.
+        app.update(key(KeyCode::Tab));
+        app.update(key(KeyCode::Down));
+        assert_eq!(app.view().attempt, 1);
+        assert_eq!(app.view().feedback, 0, "the feedback cursor starts over");
+        assert_eq!(
+            app.attempt_comments("10", "7", 1)
+                .iter()
+                .filter_map(|c| c.id.clone())
+                .collect::<Vec<_>>(),
+            ["41"]
+        );
+        assert!(
+            app.rubric_scores("10", "7", 1).is_empty(),
+            "Canvas keeps one rubric assessment, so it belongs to the latest attempt"
+        );
+    }
+
+    #[test]
+    fn comment_files_go_to_the_assignments_feedback_folder() {
+        let (lib, root) = temp_library("feedback");
+        let mut app = feedback_app(Some(lib));
+        app.update(key(KeyCode::Tab));
+        app.update(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Section::Feedback);
+        assert!(app.available(Act::Download));
+        assert!(app.available(Act::DownloadAll));
+        // The comment's file metadata is read again before it is placed.
+        let effects = app.update(key(KeyCode::Char('d')));
+        assert_eq!(fetches(&effects), [ResourceKey::File("77".into())]);
+        let effects = deliver_file(&mut app, canvas_file("77", "marked.pdf", "3"));
+        assert!(
+            download_target(&effects).ends_with(
+                Path::new("GPU Computing")
+                    .join("Assignment Files")
+                    .join("Lab-2")
+                    .join("Feedback")
+                    .join("marked.pdf")
+            ),
+            "{effects:?}"
+        );
+        assert!(
+            app.feedback_dir("10", "7")
+                .unwrap()
+                .ends_with(Path::new("Lab-2").join("Feedback"))
+        );
+        // The comment with no file says so instead of downloading anything.
+        app.update(key(KeyCode::Down));
+        assert!(!app.available(Act::Download));
+        assert!(app.update(key(KeyCode::Char('d'))).is_empty());
+        assert!(app.notice.take().unwrap().contains("No file"));
+        assert!(app.update(key(KeyCode::Enter)).is_empty());
+        assert!(app.notice.take().unwrap().contains("Press o"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// An assignment that takes one submission kind, ready to submit.
+    fn submit_app(submission_type: &str) -> App {
+        let mut app = App::new(ORIGIN, None);
+        app.stack.push(View::new(ViewKind::Detail {
+            course_id: "10".into(),
+            course_name: "GPU".into(),
+            assignment_id: "20".into(),
+            title: "Lab".into(),
+        }));
+        let mut detail = AssignmentDetail::default();
+        detail.base.id = "20".into();
+        detail.base.submission_types = vec![submission_type.into()];
+        let resource = app.details.entry(("10".into(), "20".into())).or_default();
+        resource.data = Some(detail);
+        resource.origin = Origin::Network;
+        resource.fetched_at = Some(Utc::now());
+        app
+    }
+
+    #[test]
+    fn text_submission_reviews_the_exact_text_and_needs_an_explicit_yes() {
+        let mut app = submit_app("online_text_entry");
+        // `s` is for files, which this assignment does not take.
+        assert!(!app.available(Act::Submit));
+        assert!(app.available(Act::SubmitText));
+        assert!(!app.available(Act::SubmitUrl));
+        assert!(app.update(key(KeyCode::Char('s'))).is_empty());
+        assert!(app.submission.is_none());
+        assert!(app.notice.take().unwrap().contains("file uploads"));
+        // `t` opens the text box, not the path box.
+        assert!(app.update(key(KeyCode::Char('t'))).is_empty());
+        assert_eq!(app.screen_scopes(), vec![Scope::TextInput]);
+        let draft = app.submission.as_ref().unwrap();
+        assert_eq!(draft.kind, DraftKind::Text);
+        assert!(draft.input.is_empty(), "the text box starts empty");
+        // Letters are text here, including keys that are commands elsewhere.
+        app.update(Msg::Paste("My answer".into()));
+        app.update(key(KeyCode::Char('.')));
+        assert_eq!(app.submission.as_ref().unwrap().input, "My answer.");
+        // Enter reviews; nothing is sent yet.
+        assert!(app.update(key(KeyCode::Enter)).is_empty());
+        let draft = app.submission.as_ref().unwrap();
+        assert!(draft.reviewing);
+        assert_eq!(draft.content, "My answer.", "exactly what will be sent");
+        assert_eq!(app.screen_scopes(), vec![Scope::Review]);
+        // n goes back to editing, with the text kept.
+        app.update(key(KeyCode::Char('n')));
+        assert!(!app.submission.as_ref().unwrap().reviewing);
+        assert_eq!(app.submission.as_ref().unwrap().input, "My answer.");
+        app.update(key(KeyCode::Enter));
+        // Only `y` sends it, and only once.
+        let effects = app.update(key(KeyCode::Char('y')));
+        assert!(
+            matches!(&effects[..], [Effect::SubmitContent { course_id, assignment_id, kind, content }]
+                if course_id == "10" && assignment_id == "20" && *kind == DraftKind::Text && content == "My answer."),
+            "{effects:?}"
+        );
+        assert!(app.update(key(KeyCode::Char('y'))).is_empty());
+        // Canvas's answer closes the draft and re-reads the assignment.
+        let effects = app.update(Msg::Submitted {
+            course_id: "10".into(),
+            assignment_id: "20".into(),
+            result: Ok("Submitted and verified your text on Canvas.".into()),
+        });
+        assert!(app.submission.is_none());
+        assert!(app.notice.as_deref().unwrap().contains("verified"));
+        assert!(fetches(&effects).contains(&ResourceKey::Detail("10".into(), "20".into())));
+    }
+
+    #[test]
+    fn typed_text_can_come_from_a_file_and_an_empty_entry_is_refused() {
+        let dir = std::env::temp_dir().join(format!("tuicanvas-app-text-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let answer = dir.join("answer.txt");
+        std::fs::write(&answer, "Line one.\nLine two.\n").unwrap();
+        let mut app = submit_app("online_text_entry");
+        app.update(key(KeyCode::Char('t')));
+        // An empty box cannot be reviewed.
+        assert!(app.update(key(KeyCode::Enter)).is_empty());
+        assert!(!app.submission.as_ref().unwrap().reviewing);
+        assert!(app.notice.take().unwrap().contains("Type the text"));
+        // Ctrl+O switches to naming a file, using the path box of the upload flow.
+        app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('o'),
+            KeyModifiers::CONTROL,
+        )));
+        assert_eq!(app.screen_scopes(), vec![Scope::PathInput]);
+        app.submission.as_mut().unwrap().input = answer.to_string_lossy().into_owned();
+        assert!(app.update(key(KeyCode::Enter)).is_empty());
+        let draft = app.submission.as_ref().unwrap();
+        assert!(draft.reviewing);
+        assert_eq!(draft.content, "Line one.\nLine two.");
+        assert!(draft.source.as_deref().unwrap().ends_with("answer.txt"));
+        let effects = app.update(key(KeyCode::Char('y')));
+        assert!(
+            matches!(&effects[..], [Effect::SubmitContent { content, .. }]
+            if content == "Line one.\nLine two.")
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn url_submission_shows_the_address_it_will_send() {
+        let mut app = submit_app("online_url");
+        assert!(app.available(Act::SubmitUrl));
+        assert!(!app.available(Act::SubmitText));
+        app.update(key(KeyCode::Char('u')));
+        assert_eq!(app.submission.as_ref().unwrap().kind, DraftKind::Url);
+        app.update(Msg::Paste("example.com/work".into()));
+        app.update(key(KeyCode::Enter));
+        let draft = app.submission.as_ref().unwrap();
+        assert!(draft.reviewing);
+        assert_eq!(
+            draft.content, "https://example.com/work",
+            "the review screen shows the address with the scheme Canvas needs"
+        );
+        let effects = app.update(key(KeyCode::Char('y')));
+        assert!(
+            matches!(&effects[..], [Effect::SubmitContent { kind, content, .. }]
+            if *kind == DraftKind::Url && content == "https://example.com/work")
+        );
+        // An address that cannot be sent keeps the draft open.
+        let mut app = submit_app("online_url");
+        app.update(key(KeyCode::Char('u')));
+        app.update(Msg::Paste("not a url".into()));
+        app.update(key(KeyCode::Enter));
+        assert!(!app.submission.as_ref().unwrap().reviewing);
+        assert!(app.notice.take().unwrap().contains("spaces"));
+        // Esc leaves without sending anything.
+        app.update(key(KeyCode::Esc));
+        assert!(app.submission.is_none());
     }
 }

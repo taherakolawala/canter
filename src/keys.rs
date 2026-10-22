@@ -37,6 +37,8 @@ pub enum Act {
     DownloadAll,
     ShowFolder,
     Submit,
+    SubmitText,
+    SubmitUrl,
     JumpToLink,
     HideCourse,
     ShowHidden,
@@ -47,12 +49,13 @@ pub enum Act {
     InputCancel,
     InputComplete,
     InputClear,
+    LoadTextFile,
     Confirm,
 }
 
 impl Act {
     #[cfg(test)]
-    pub const ALL: [Act; 33] = [
+    pub const ALL: [Act; 36] = [
         Act::Up,
         Act::Down,
         Act::Left,
@@ -75,6 +78,8 @@ impl Act {
         Act::DownloadAll,
         Act::ShowFolder,
         Act::Submit,
+        Act::SubmitText,
+        Act::SubmitUrl,
         Act::JumpToLink,
         Act::HideCourse,
         Act::ShowHidden,
@@ -85,6 +90,7 @@ impl Act {
         Act::InputCancel,
         Act::InputComplete,
         Act::InputClear,
+        Act::LoadTextFile,
         Act::Confirm,
     ];
 }
@@ -112,6 +118,8 @@ pub enum Scope {
     Links,
     /// The past submissions section has focus.
     Submissions,
+    /// The instructor feedback section has focus.
+    Feedback,
     /// The month grid on the course list has focus.
     Calendar,
     /// The selected day's entries have focus.
@@ -122,6 +130,8 @@ pub enum Scope {
     Filter,
     /// Typing a file path to submit.
     PathInput,
+    /// Typing the text or the web address to submit.
+    TextInput,
     /// Confirming a submission.
     Review,
     Menu,
@@ -239,6 +249,11 @@ pub static BINDINGS: &[Binding] = &[
         .title("Next item")
         .hint(3)
         .shown("↑↓"),
+    b(Act::Up, &[UP, ch('k')], &[Feedback], "select").title("Previous comment or criterion"),
+    b(Act::Down, &[DOWN, ch('j')], &[Feedback], "select")
+        .title("Next comment or criterion")
+        .hint(1)
+        .shown("↑↓"),
     b(Act::Up, &[UP, ch('k')], &[Submissions], "attempt").title("Newer attempt"),
     b(Act::Down, &[DOWN, ch('j')], &[Submissions], "attempt")
         .title("Older attempt")
@@ -303,6 +318,9 @@ pub static BINDINGS: &[Binding] = &[
     b(Act::Top, &[HOME, ch('g')], &[Screen, Help], "top").title("Go to the top"),
     b(Act::Bottom, &[END, ch('G')], &[Screen, Help], "bottom").title("Go to the bottom"),
     // Opening and going back.
+    b(Act::Open, &[ENTER, RIGHT, ch('l')], &[Feedback], "open")
+        .title("Open the file attached to the selected comment")
+        .hint(2),
     b(Act::Open, &[ENTER, RIGHT, ch('l')], &[Links], "open")
         .title("Open the selected file or link")
         .hint(2),
@@ -315,7 +333,7 @@ pub static BINDINGS: &[Binding] = &[
     b(
         Act::Back,
         &[ESC, LEFT, ch('h'), BACKSPACE],
-        &[Links, Submissions],
+        &[Links, Submissions, Feedback],
         "done",
     )
     .title("Back to the text")
@@ -338,7 +356,7 @@ pub static BINDINGS: &[Binding] = &[
     b(Act::PrevSection, &[BACKTAB], &[Courses], "calendar")
         .title("Switch between the courses and the calendar"),
     b(Act::NextSection, &[TAB], &[Sections], "next section")
-        .title("Next section (text, files & links, submissions)")
+        .title("Next section (text, files & links, submissions, feedback)")
         .hint(5),
     b(
         Act::PrevSection,
@@ -375,6 +393,14 @@ pub static BINDINGS: &[Binding] = &[
         .title("Quit")
         .menu('q', Group::App),
     // Files.
+    b(Act::Download, &[ch('d')], &[Feedback], "download")
+        .title("Download the selected comment's files")
+        .menu('d', Group::Selected)
+        .hint(3),
+    b(Act::DownloadAll, &[ch('D')], &[Feedback], "all feedback")
+        .title("Download every file attached to this feedback")
+        .menu('D', Group::Here)
+        .hint(4),
     b(Act::Download, &[ch('d')], &[Files, Links], "download")
         .title("Download")
         .menu('d', Group::Selected)
@@ -417,6 +443,14 @@ pub static BINDINGS: &[Binding] = &[
         .title("Submit files")
         .menu('s', Group::Here)
         .hint(4),
+    b(Act::SubmitText, &[ch('t')], &[Assignment], "text")
+        .title("Submit typed text")
+        .menu('t', Group::Here)
+        .hint(5),
+    b(Act::SubmitUrl, &[ch('u')], &[Assignment], "URL")
+        .title("Submit a website URL")
+        .menu('u', Group::Here)
+        .hint(5),
     // Courses.
     b(Act::HideCourse, &[], &[Courses], "hide")
         .title("Hide or restore this course")
@@ -461,14 +495,31 @@ pub static BINDINGS: &[Binding] = &[
     b(Act::InputCancel, &[ESC], &[PathInput], "cancel")
         .title("Cancel submitting")
         .hint(5),
+    b(Act::InputDone, &[ENTER], &[TextInput], "review")
+        .title("Review what will be sent")
+        .hint(1),
+    b(
+        Act::LoadTextFile,
+        &[Key::Ctrl('o')],
+        &[TextInput],
+        "from a file",
+    )
+    .title("Read the text from a file instead")
+    .hint(3),
+    b(Act::InputClear, &[Key::Ctrl('u')], &[TextInput], "clear")
+        .title("Clear what is typed")
+        .hint(4),
+    b(Act::InputCancel, &[ESC], &[TextInput], "cancel")
+        .title("Cancel submitting")
+        .hint(5),
     b(Act::InputCancel, &[ESC], &[MenuSearch], "stop searching")
         .title("Stop searching")
         .hint(2),
     b(Act::Confirm, &[ch('y')], &[Review], "submit now")
         .title("Submit to Canvas")
         .hint(1),
-    b(Act::InputCancel, &[ESC, ch('n')], &[Review], "edit files")
-        .title("Go back and edit the files")
+    b(Act::InputCancel, &[ESC, ch('n')], &[Review], "edit")
+        .title("Go back and edit what will be sent")
         .hint(2)
         .shown("n/Esc"),
 ];
@@ -495,7 +546,7 @@ pub const CORE: &[(Key, Act)] = &[
 pub fn typing(scopes: &[Scope]) -> bool {
     scopes
         .iter()
-        .any(|s| matches!(s, Filter | PathInput | MenuSearch))
+        .any(|s| matches!(s, Filter | PathInput | TextInput | MenuSearch))
 }
 
 pub fn key_of(event: &KeyEvent) -> Key {
@@ -648,6 +699,8 @@ mod tests {
             vec![Screen, Page, Sections, Assignment, HasLinks, Links],
             vec![Screen, Page, Sections, Assignment, Submissions],
             vec![Screen, Page, Sections, Assignment, HasLinks, Submissions],
+            vec![Screen, Page, Sections, Assignment, Feedback],
+            vec![Screen, Page, Sections, Assignment, HasLinks, Feedback],
             vec![Screen, Page, CourseTabs],
             vec![Screen, Page, CourseTabs, HasLinks],
             vec![Screen, Page, CourseTabs, HasLinks, Links],
@@ -660,6 +713,7 @@ mod tests {
         out.extend([
             vec![Filter],
             vec![PathInput],
+            vec![TextInput],
             vec![Review],
             vec![Menu],
             vec![MenuSearch],

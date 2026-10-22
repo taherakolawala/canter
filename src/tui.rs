@@ -74,6 +74,36 @@ impl Executor {
         });
     }
 
+    /// Typed text or a website address, confirmed on the review screen.
+    fn submit_content(
+        &self,
+        course_id: String,
+        assignment_id: String,
+        kind: crate::submission::DraftKind,
+        content: String,
+    ) {
+        let client = self.client.clone();
+        let session = self.session.clone();
+        let session_path = self.session_path.clone();
+        let tx = self.tx.clone();
+        self.rt.spawn(async move {
+            let result = crate::submission::submit_content(
+                &client,
+                &course_id,
+                &assignment_id,
+                kind,
+                &content,
+            )
+            .await;
+            persist_rotated_cookies(&client, &session, &session_path);
+            let _ = tx.send(Msg::Submitted {
+                course_id,
+                assignment_id,
+                result,
+            });
+        });
+    }
+
     pub(crate) fn session_handle(&self) -> Arc<Mutex<SessionFile>> {
         self.session.clone()
     }
@@ -670,6 +700,12 @@ pub fn run(config: &Config, options: Options) -> Result<(), String> {
                     assignment_id,
                     files,
                 } => executor.submit(course_id, assignment_id, files),
+                Effect::SubmitContent {
+                    course_id,
+                    assignment_id,
+                    kind,
+                    content,
+                } => executor.submit_content(course_id, assignment_id, kind, content),
                 Effect::Login => {
                     input.pause();
                     ratatui::restore();
