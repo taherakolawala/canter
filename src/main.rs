@@ -4,9 +4,11 @@ mod announcements;
 mod api;
 mod app;
 mod bench;
+mod browser;
 mod cache;
 mod calendar;
 mod canvas;
+mod cdp;
 mod config;
 mod diag;
 mod download;
@@ -20,6 +22,8 @@ mod modules;
 mod procstats;
 mod protect;
 mod session;
+mod signin;
+mod signin_view;
 mod smoke;
 mod submission;
 mod theme;
@@ -27,13 +31,17 @@ mod transport;
 mod tui;
 mod ui;
 mod upload_body;
+mod ws;
 
 const HELP: &str = "TUICanvas — terminal Canvas interface
 
 Usage:
   tuicanvas                 Open the reader (signs in first if needed)
   tuicanvas --diag          Also log request timings to the data folder
-  tuicanvas --login         Sign in again with the browser-assisted helper
+  tuicanvas --login [--window | --python] [--show-password] [--fresh] [--chrome]
+                            Sign in again. By default TUICanvas drives Edge in
+                            the background; --window opens a small sign-in
+                            window you drive; --python runs the old helper
   tuicanvas --logout        Delete the saved session and this account's saved copies
   tuicanvas --smoke [--course NAME] [--assignment NAME]
                             Read-only live check; writes benchmarks/private/smoke.json
@@ -45,7 +53,8 @@ Usage:
 
 Keys: arrows/jk move, Enter open, Esc back, / filter, r refresh,
       s submit files from an assignment, o open in browser, L sign in, q quit
-Env:  TUICANVAS_ORIGIN (default https://ufl.instructure.com), TUICANVAS_HOME";
+Env:  TUICANVAS_ORIGIN (default https://ufl.instructure.com), TUICANVAS_HOME,
+      TUICANVAS_SIGNIN (background | window | python), TUICANVAS_BROWSER";
 
 fn value_after(args: &[String], flag: &str) -> Option<String> {
     args.iter()
@@ -108,7 +117,7 @@ fn main() {
             }
         }
     } else if args.iter().any(|a| a == "--login") {
-        match tui::run_login_helper(&config) {
+        match tui::sign_in(&config, login_choice(&args, &config), login_options(&args)) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("{e}");
@@ -134,6 +143,35 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+/// Which sign-in path `--login` runs: the flags first, then the setting.
+fn login_choice(args: &[String], config: &config::Config) -> config::SignIn {
+    if args.iter().any(|a| a == "--python") {
+        config::SignIn::Python
+    } else if args.iter().any(|a| a == "--window" || a == "--browser") {
+        config::SignIn::Window
+    } else if args
+        .iter()
+        .any(|a| a == "--headless" || a == "--background")
+    {
+        config::SignIn::Background
+    } else {
+        config.signin_choice()
+    }
+}
+
+fn login_options(args: &[String]) -> signin::Options {
+    signin::Options {
+        channel: if args.iter().any(|a| a == "--chrome") {
+            browser::Channel::Chrome
+        } else {
+            browser::Channel::Edge
+        },
+        show_password: args.iter().any(|a| a == "--show-password"),
+        fresh: args.iter().any(|a| a == "--fresh"),
+        ..signin::Options::default()
+    }
 }
 
 fn logout(config: &config::Config) -> i32 {

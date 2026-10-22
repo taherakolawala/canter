@@ -65,3 +65,69 @@ The helper uses stored sessions first on normal runs as well. `--fresh` ignores 
 The new diagnostic report is `benchmarks/private/auth-login-result.json`; it contains stage/status metadata only. The old probe remains useful for isolated form inspection. The Rust reader reads this same protected session and runs the helper whenever sign-in is needed (see [status.md](status.md)).
 
 Automated checks cover cookie scope, expiration/path matching, rotated/deleted cookie handling, native origin restrictions, CSRF scope, terminal-control filtering, response redaction, Windows encryption round trips, and replay of the observed Duo screen sequence. The streamlined presentation has been tested against synthetic versions of the observed screens; a new cold login has not been triggered solely to retest its appearance. The original helper's terminal Duo completion and native reads were live-verified by the user's run, followed by our successful native saved-session check.
+
+## Sign-in in Rust
+
+The reader signs in itself, with no Python and no Playwright. It drives Microsoft Edge over the DevTools protocol: a real browser rendering UF's own login, controlled from the terminal. The Python helper stays in the tree and still works (`tuicanvas --login --python`).
+
+Two modes share the code in `src/signin.rs`.
+
+**Background (the default for UF).** Edge runs with `--headless=new`, so there is no window. TUICanvas reads each page, asks for the GatorLink username and password in the terminal, fills UF's form, clicks UF's submit button, and shows every Duo screen on one status line, the same presentation the Python helper has: loading passes by on its own, Verified Push shows the code, the remembered-device question asks `y`/`n`, `o` opens other options, `m` shows the full prompt, `q` cancels. An unfamiliar challenge keeps its own instructions and numbered controls rather than being given a meaning it may not have.
+
+**Window (the fallback, and the default for any other Canvas site).** `tuicanvas --login --window` opens a separate, phone-sized sign-in window (Edge with `--app=<url>` and `--window-size=420,760`), not a tab in a browser that is already open. The user drives it, so a password manager, a passkey, a security key and a Duo phone call all work. TUICanvas reads nothing from that page and types nothing into it; it watches for the Canvas session and closes the window as soon as sign-in finishes. The window is reachable on purpose, not only after a failure: by the flag, or by `TUICANVAS_SIGNIN=window`.
+
+`TUICANVAS_SIGNIN` selects the default path: `background`, `window` or `python`. `TUICANVAS_BROWSER` names an exact browser executable, and `--chrome` uses an installed Chrome instead of Edge.
+
+### What it does with the password
+
+The username and password live in memory only long enough to reach the page. The password is typed with the protocol's `Input.insertText` after the field is focused, so it never appears in a script, a log line, a diagnostic report or a file. Password input is hidden unless `--show-password` is given; a terminal that cannot hide it is refused rather than echoing it. Nothing is typed into a page whose URL changed since it was read, and nothing is ever typed into a Canvas page.
+
+### Where the session goes
+
+The browser's cookies are read with `Storage.getCookies`, converted to the session file's existing cookie shape (the same field names and leading-dot domain convention Playwright's storage state uses), and confirmed with one `/api/v1/users/self/profile` read, not by looking for something on Canvas's page. The result is written through `src/protect.rs` to the same DPAPI-protected file at `%LOCALAPPDATA%\TUICanvas\<host>.session.dpapi`, with any fields an earlier Python-written file had (its `origins` list, for example) carried over untouched. Nothing downstream changes.
+
+The sign-in browser uses its own profile folder, `%LOCALAPPDATA%\TUICanvas\signin\<host>`, so the user's real browser profile, extensions and sessions are untouched. Keeping that folder between runs is what lets UF's and Duo's remembered-device cookies survive; a saved session's cookies are also restored into the browser before it starts, for the same reason. One consequence of a separate profile: a password-manager extension installed in the user's own browser is not present in the window mode, though the operating system's autofill and passkeys still are. Browser local storage is not captured by the Rust path; the reader needs only cookies, and a file the Python helper wrote keeps its `origins` list.
+
+### Failures, told apart
+
+Each of these is reported differently, because what to do next differs: a password UF rejected (its form comes back after a submit, and nothing is retried automatically), Duo denied, a Duo request that ran out of time, no Edge or Chrome installed, the window closed or the browser gone, a network failure, a page outside the UF/Duo/Canvas origins, Canvas accepting the browser but not a direct API read, and the overall ten-minute limit.
+
+### What breaks if UF changes its page
+
+The background mode knows four things about UF's and Duo's pages. If UF changes any of them, the window mode still works and is the fallback:
+
+- the field names `j_username` and `j_password`, and the submit control `[name="_eventId_proceed"]` (a `<button>`, which is why it is clicked rather than the form being submitted);
+- the start URL `https://ufl.instructure.com/login/saml/355`;
+- the wording Duo's screens use, which decides which short status line is shown: "Enter code in Duo Mobile", "Check for a Duo Push", "Is this your device?", "Success!", and the denied and timed-out wordings. Unrecognised wording falls through to the interactive prompt, so a changed screen is shown rather than mishandled;
+- that sign-in stays on `ufl.instructure.com`, `login.ufl.edu` and `*.duosecurity.com`. Any other origin stops the background mode.
+
+The page is read in the main frame and in frames of it that are same-origin; a cross-origin frame cannot be read, which is why Duo's own page (a top-level navigation today) is what the status lines describe.
+
+The protocol side depends on Edge writing its chosen port and endpoint path to `DevToolsActivePort` in the profile folder, and on `Target.getTargets`, `Target.attachToTarget`, `Runtime.evaluate`, `Input.insertText`, `Storage.getCookies` and `Storage.setCookies`. Those methods have been stable for years, but they are Chromium's, not a standard.
+
+One limit: the browser is closed when sign-in ends, either way, but a reader that is killed outright cannot close it. A sign-in window left behind that way can be closed by hand; the next sign-in reuses the same profile folder.
+
+### Verified live without credentials
+
+Run on 2026-10-22 on the owner's machine, stopping at the password prompt so nothing was sent: Edge was found and started with the dedicated profile, wrote `DevToolsActivePort`, accepted the WebSocket handshake, and answered `Target.getTargets` and `Target.attachToTarget`. The page was navigated to UF's SAML start and read, the GatorLink form was recognised, and the terminal showed `Connecting to Canvas…` then `Sign in with your GatorLink account`. `--login --window` opened its own Edge window and showed `Finish signing in in the sign-in window`. Nothing beyond the public form was exercised.
+
+### Live verification still to do
+
+Everything after the form is unverified: filling the password, UF's submit, every Duo screen, reading the cookies, the native check, saving the session, closing the window on success, and each failure case. The owner's credentials were not available, and the tests never touch the network. These are the runs to make, in this order.
+
+```powershell
+cargo test
+target\release\tuicanvas.exe --logout
+target\release\tuicanvas.exe --login
+```
+
+What to look for on `--login`: one status line that updates in place (`Connecting to Canvas…`, then the GatorLink prompt, then `Checking your password…`), a Duo line that names the push or shows the three-digit code, the remembered-device question answered only by `y`/`n`, and a final `Signed in. Your session is saved for next time.` No window should appear, no `msedge.exe` should be left running afterwards, and `%LOCALAPPDATA%\TUICanvas\ufl.session.dpapi` should have a new timestamp. Then `target\release\tuicanvas.exe --smoke` should pass with that session.
+
+Then the failure paths, one at a time: a deliberately wrong password (expect "UF did not accept that sign-in", and a prompt that does not retry on its own), a denied Duo request, and a Duo request left to expire. Then the window mode:
+
+```powershell
+target\release\tuicanvas.exe --logout
+target\release\tuicanvas.exe --login --window
+```
+
+A single small window (about 420 by 760) should open on its own, outside any browser already running, and close itself a second or two after Canvas loads. Closing it by hand should report "The sign-in window was closed." Finally, `$env:TUICANVAS_SIGNIN = "python"` with `tuicanvas --login` should still run the Python helper unchanged.

@@ -278,6 +278,26 @@ pub struct SessionFile {
 }
 
 impl SessionFile {
+    /// A session for `origin` holding `jar`. When an earlier file for the
+    /// same origin is given, the fields this reader does not interpret (the
+    /// Playwright `origins` list, for instance) are carried over so a later
+    /// browser login still has them.
+    pub fn new(
+        origin: &str,
+        user_id: Option<u64>,
+        jar: CookieJar,
+        previous: Option<&SessionFile>,
+    ) -> Self {
+        SessionFile {
+            origin: origin.to_string(),
+            user_id,
+            saved_at: now_seconds(),
+            jar,
+            browser_rest: previous.map(|p| p.browser_rest.clone()).unwrap_or_default(),
+            top_rest: previous.map(|p| p.top_rest.clone()).unwrap_or_default(),
+        }
+    }
+
     pub fn parse(bytes: &[u8], expected_origin: &str) -> Result<Self, SessionError> {
         let invalid = || SessionError("Saved session is invalid; sign in again.".into());
         let mut top: Map<String, Value> = serde_json::from_slice(bytes).map_err(|_| invalid())?;

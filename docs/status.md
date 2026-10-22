@@ -8,7 +8,7 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
 
 | Milestone | State | What exists |
 | --- | --- | --- |
-| 1. Sign-in and request experiment | **Done** | Terminal sign-in (GatorLink + Duo); live-verified native REST and GraphQL reads; failure classification; [request policy](request-policy.md) |
+| 1. Sign-in and request experiment | **Done**; Rust sign-in awaiting a live run | Terminal sign-in (GatorLink + Duo), now in Rust driving Edge over the DevTools protocol, with a separate phone-sized sign-in window as the fallback and the Python helper kept as a last resort; live-verified native REST and GraphQL reads; failure classification; [request policy](request-policy.md) |
 | 2. Reader vertical slice | **Done** | Courses → assignments → assignment detail, with saved copy + Syncing, refresh, back, filter, open in browser |
 | 3. Rendering and network baseline | **Done** | Network, parse and draw timed separately (`--diag`, `--bench`); automated website baseline; the reader shows fresh data 6–10× sooner than the website ([baseline](../benchmarks/baseline-2026-10-20.md)) |
 | 4. Selective resource reuse | Partly | Saved copies for courses, assignments, files and announcements (always re-read on entry) |
@@ -21,8 +21,10 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
 
 ## What works today
 
-- **Sign-in.** `tools/terminal_login.py` runs UF's normal login in a hidden Edge window, driven from the terminal.
+- **Sign-in.** TUICanvas itself runs UF's normal login in a hidden Edge window, driven from the terminal over the DevTools protocol (`src/signin.rs`); no Python and no Playwright. Offline tests pass; **no live run yet** (see [authentication.md](authentication.md) for the checks to make).
   - You type your GatorLink password and approve Duo (plain push or Verified Push), with progress shown on one spinner line.
+  - `tuicanvas --login --window` instead opens a separate phone-sized sign-in window you drive, which is what a password manager, a passkey, a security key or a Duo phone call needs; it closes itself when sign-in finishes. That is also the default for Canvas sites other than UF (`TUICANVAS_SIGNIN=background|window|python`).
+  - `tools/terminal_login.py` is still there as a last resort: `tuicanvas --login --python`.
   - The session is encrypted with Windows DPAPI under `%LOCALAPPDATA%\TUICanvas`.
   - The app starts sign-in itself if the saved session has expired at launch. Mid-session expiry shows a banner and waits for `L`.
 - **Reader** (`target\release\tuicanvas.exe`).
@@ -55,7 +57,7 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
   - All three build-plan performance goals are met.
 - **Downloads**, measured live: a 908 KB PDF in 1.1 s through the full redirect chain, saved, linked and marked as downloaded from the internet.
 - **Announcements live check (2026-10-21).** Rust read all 1,380 announcements across 17 courses and opened one detail in each of the 13 nonempty courses. Median list refresh: 237 ms. The 674-item course took 5.43 s across seven pages, 205 KB; cached lists remain visible while refreshing. Counts match the earlier probe; no account content is included in the report.
-- **Checks.** 150 Rust tests (Windows) and 32 Python tests pass. `tuicanvas --smoke` re-verifies live reads, file access and one download; `tuicanvas --dump DIR` renders each screen headlessly, including the Files tab, and downloads one file into a scratch library.
+- **Checks.** 192 Rust tests (Windows) and 32 Python tests pass. `tuicanvas --smoke` re-verifies live reads, file access and one download; `tuicanvas --dump DIR` renders each screen headlessly, including the Files tab, and downloads one file into a scratch library.
 
 - **Images in the terminal** (prototype). Images embedded in assignment, page
   and announcement text are drawn where the text has them, from the copy the
@@ -66,7 +68,7 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
 ## Known issues and limits
 
 - **Sessions don't last long.** Two data points so far: both expired within a day (under 22 h), and each needed a password and Duo again.
-- **Sign-in depends on Python.** It needs the project's Python environment, Playwright and Microsoft Edge. The reader itself is a single Rust binary.
+- **Sign-in needs a browser, not Python.** The reader is one Rust binary and drives Microsoft Edge (or Chrome) itself; only the `--python` fallback needs the project's Python environment and Playwright. Edge is still required, and the Rust path is unverified against UF live.
 - **Windows only** for now: session protection uses DPAPI.
 - **Order of undated assignments** differs from Canvas in 1 of 17 courses (cosmetic).
 - **Back re-reads the list.** Returning to a list from a detail re-reads it, per the approved "fresh on every entry" rule. This costs one request per Back.
@@ -104,7 +106,7 @@ After version 2, the remaining version 1 milestones follow. The baseline shows t
 3. **Session lifetime.** Run with `--diag` over several days to learn how long sessions last, and whether choosing "remember this device" in Duo skips the push.
 4. **Milestone 6.**
    - Hardening: throttling, resizing, terminal restore on errors, install instructions.
-   - Possibly a Rust-native sign-in to remove the Python dependency (a decision for later).
+   - Hardening the Rust sign-in after its first live runs (see [authentication.md](authentication.md)).
 
 ## How to check the current state
 
