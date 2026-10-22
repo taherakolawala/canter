@@ -32,6 +32,8 @@ pub enum ResourceKey {
     WikiPage(String, String),
     /// A course's grades: its groups, scores and instructor comments.
     Grades(String),
+    /// A course's page list, without the pages' text.
+    Pages(String),
 }
 
 impl ResourceKey {
@@ -67,6 +69,7 @@ impl ResourceKey {
                 format!("page-{}-{u}", c.replace('~', "_"))
             }
             ResourceKey::Grades(c) if ok(c) => format!("grades-{}", c.replace('~', "_")),
+            ResourceKey::Pages(c) if ok(c) => format!("pages-{}", c.replace('~', "_")),
             _ => return None,
         };
         Some(name + ".json")
@@ -88,6 +91,7 @@ impl ResourceKey {
             ResourceKey::Modules(_) => "modules",
             ResourceKey::WikiPage(..) => "page",
             ResourceKey::Grades(_) => "grades",
+            ResourceKey::Pages(_) => "pages",
         }
     }
 }

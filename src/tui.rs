@@ -134,6 +134,9 @@ impl Executor {
                 ResourceKey::Grades(c) => crate::grades::read(&client, c)
                     .await
                     .map(|(v, s)| (Payload::Grades(Box::new(v)), s)),
+                ResourceKey::Pages(c) => crate::modules::pages(&client, c)
+                    .await
+                    .map(|(v, s)| (Payload::Pages(v), s)),
             };
             let at = Utc::now();
             if let Ok((payload, _)) = &result {
@@ -152,6 +155,7 @@ impl Executor {
                     Payload::Modules(v) => store.save(&key, v, at),
                     Payload::WikiPage(v) => store.save(&key, v.as_ref(), at),
                     Payload::Grades(v) => store.save(&key, v.as_ref(), at),
+                    Payload::Pages(v) => store.save(&key, v, at),
                 }
             }
             persist_rotated_cookies(&client, &session, &session_path);

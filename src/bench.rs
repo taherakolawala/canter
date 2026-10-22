@@ -111,6 +111,10 @@ fn current_has_data(app: &App) -> bool {
         ViewKind::Grades { course_id, .. } => {
             app.grades.get(course_id).is_some_and(|r| r.data.is_some())
         }
+        ViewKind::Pages { course_id, .. } => app
+            .page_lists
+            .get(course_id)
+            .is_some_and(|r| r.data.is_some()),
         ViewKind::WikiPage {
             course_id,
             page_url,
@@ -225,6 +229,11 @@ fn find_row(app: &App, needle: &str) -> Option<usize> {
                 matches!(app.grade_rows(course_id).get(i), Some(crate::app::GradeRow::Assignment(_, a))
                     if a.title().to_lowercase().contains(&needle))
             }
+            ViewKind::Pages { course_id, .. } => app
+                .page_lists
+                .get(course_id)
+                .and_then(|r| r.data.as_ref())
+                .is_some_and(|l| l[i].title().to_lowercase().contains(&needle)),
             ViewKind::Announcements { course_id, .. } => app
                 .announcements
                 .get(course_id)

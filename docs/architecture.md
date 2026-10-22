@@ -371,6 +371,8 @@ The tab and detail use distinct `ResourceKey` variants, so snapshots, request ge
 
 `/api/v1/courses/:id/modules?include[]=items&include[]=content_details` returns modules with their items; a module whose items Canvas leaves out is read separately. The Modules screen is one flat list of module headings and items (`ModuleRow`); headings are not selectable. Item ids, content ids and page URL names are validated before they are put into a request path or file name (`valid_slug`). `/api/v1/courses/:id/pages/:url` reads one page; its key, snapshot and render cache are separate, and page links in any HTML (`/courses/:id/pages/:url`) classify as `Target::Page` and open in the reader.
 
+The Pages tab is the page list (`/api/v1/courses/:id/pages`, newest change first), with its own key and saved copy; `Enter` opens a page through the same page read and render cache as a page reached from a module or a link, so nothing about reading a page is duplicated.
+
 ## Grades
 
 `grades.rs` reads a course's grades in three requests: the assignment groups with their weights and the student's own submissions, the course itself for the total, and one multi-assignment submission read for the instructor comments. They are one `Resource` under one key (`ResourceKey::Grades`), saved and shown at once like every other screen. The Grades screen is a flat list of group headings and assignments (`GradeRow`), with headings not selectable, as Modules does; `Enter` opens the assignment in the reader and `o` opens it on Canvas.

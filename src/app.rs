@@ -75,6 +75,7 @@ pub enum Payload {
     Modules(Vec<crate::modules::Module>),
     WikiPage(Box<crate::modules::WikiPage>),
     Grades(Box<crate::grades::Grades>),
+    Pages(Vec<crate::modules::PageSummary>),
 }
 
 /// One row of the Modules screen: a module's heading or one of its items.
@@ -116,6 +117,7 @@ pub enum CourseTab {
     Files,
     Modules,
     Grades,
+    Pages,
 }
 
 impl CourseTab {
@@ -127,6 +129,7 @@ impl CourseTab {
             CourseTab::Files => "Files",
             CourseTab::Modules => "Modules",
             CourseTab::Grades => "Grades",
+            CourseTab::Pages => "Pages",
         }
     }
 
@@ -137,6 +140,7 @@ impl CourseTab {
             "files" => Some(CourseTab::Files),
             "modules" => Some(CourseTab::Modules),
             "grades" => Some(CourseTab::Grades),
+            "pages" => Some(CourseTab::Pages),
             _ => None,
         }
     }
@@ -167,6 +171,10 @@ impl CourseTab {
                 course_name,
             },
             CourseTab::Grades => ViewKind::Grades {
+                course_id,
+                course_name,
+            },
+            CourseTab::Pages => ViewKind::Pages {
                 course_id,
                 course_name,
             },
@@ -392,6 +400,11 @@ pub enum ViewKind {
         course_id: String,
         course_name: String,
     },
+    /// Every page of a course, as a list.
+    Pages {
+        course_id: String,
+        course_name: String,
+    },
     WikiPage {
         course_id: String,
         course_name: String,
@@ -454,6 +467,10 @@ impl ViewKind {
                 course_id,
                 course_name,
             } => Some((CourseTab::Grades, course_id, course_name)),
+            ViewKind::Pages {
+                course_id,
+                course_name,
+            } => Some((CourseTab::Pages, course_id, course_name)),
             ViewKind::WikiPage {
                 course_id,
                 course_name,
@@ -532,6 +549,7 @@ impl View {
             ViewKind::Files { course_id, .. } => ResourceKey::Files(course_id.clone()),
             ViewKind::Modules { course_id, .. } => ResourceKey::Modules(course_id.clone()),
             ViewKind::Grades { course_id, .. } => ResourceKey::Grades(course_id.clone()),
+            ViewKind::Pages { course_id, .. } => ResourceKey::Pages(course_id.clone()),
             ViewKind::WikiPage {
                 course_id,
                 page_url,
@@ -613,6 +631,7 @@ pub struct App {
     tabs_read: std::collections::HashSet<String>,
     pub modules: HashMap<String, Resource<Vec<crate::modules::Module>>>,
     pub grades: HashMap<String, Resource<crate::grades::Grades>>,
+    pub page_lists: HashMap<String, Resource<Vec<crate::modules::PageSummary>>>,
     /// Instructor comments already seen here, by course and assignment. Local
     /// only: Canvas is never told what has been read.
     seen_feedback: std::collections::BTreeSet<(String, String)>,
@@ -732,6 +751,7 @@ impl App {
             tabs_read: std::collections::HashSet::new(),
             modules: HashMap::new(),
             grades: HashMap::new(),
+            page_lists: HashMap::new(),
             seen_feedback,
             show_course_grades,
             wiki_pages: HashMap::new(),
@@ -774,6 +794,7 @@ impl App {
             ResourceKey::Tabs(c) => self.tabs.get(c).map(|r| &r.sync),
             ResourceKey::Modules(c) => self.modules.get(c).map(|r| &r.sync),
             ResourceKey::Grades(c) => self.grades.get(c).map(|r| &r.sync),
+            ResourceKey::Pages(c) => self.page_lists.get(c).map(|r| &r.sync),
             ResourceKey::WikiPage(c, u) => self
                 .wiki_pages
                 .get(&(c.clone(), u.clone()))
@@ -813,6 +834,7 @@ impl App {
             ResourceKey::Tabs(c) => self.tabs.entry(c.clone()).or_default().sync = sync,
             ResourceKey::Modules(c) => self.modules.entry(c.clone()).or_default().sync = sync,
             ResourceKey::Grades(c) => self.grades.entry(c.clone()).or_default().sync = sync,
+            ResourceKey::Pages(c) => self.page_lists.entry(c.clone()).or_default().sync = sync,
             ResourceKey::WikiPage(c, u) => {
                 self.wiki_pages
                     .entry((c.clone(), u.clone()))
@@ -994,6 +1016,17 @@ impl App {
             }
             ResourceKey::Modules(c) => {
                 let res = self.modules.entry(c.clone()).or_default();
+                if res.data.is_none()
+                    && let Some((data, at)) = store.load(key)
+                {
+                    res.data = Some(data);
+                    res.fetched_at = Some(at);
+                    res.origin = Origin::Cache;
+                    res.version += 1;
+                }
+            }
+            ResourceKey::Pages(c) => {
+                let res = self.page_lists.entry(c.clone()).or_default();
                 if res.data.is_none()
                     && let Some((data, at)) = store.load(key)
                 {
@@ -1277,6 +1310,14 @@ impl App {
                         r.version += 1;
                         effects.extend(self.follow_tabs());
                     }
+                    (Payload::Pages(list), ResourceKey::Pages(c)) => {
+                        let r = self.page_lists.entry(c.clone()).or_default();
+                        r.data = Some(list);
+                        r.origin = Origin::Network;
+                        r.fetched_at = Some(at);
+                        r.sync = SyncState::Idle;
+                        r.version += 1;
+                    }
                     (Payload::Grades(grades), ResourceKey::Grades(c)) => {
                         let r = self.grades.entry(c.clone()).or_default();
                         r.data = Some(*grades);
@@ -1396,6 +1437,16 @@ impl App {
             ViewKind::Files { .. } => (0..self.file_rows().len()).collect(),
             ViewKind::Modules { course_id, .. } => self.visible_modules(course_id, &view.filter),
             ViewKind::Grades { course_id, .. } => self.visible_grades(course_id, &view.filter),
+            ViewKind::Pages { course_id, .. } => self
+                .page_lists
+                .get(course_id)
+                .and_then(|r| r.data.as_deref())
+                .unwrap_or(&[])
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| matches_filter(p.title(), &view.filter))
+                .map(|(i, _)| i)
+                .collect(),
         }
     }
 
@@ -1660,6 +1711,7 @@ impl App {
                 CourseTab::Announcements,
                 CourseTab::Modules,
                 CourseTab::Grades,
+                CourseTab::Pages,
             ] {
                 if !out.contains(&tab) {
                     out.push(tab);
@@ -2443,7 +2495,8 @@ impl App {
             },
             ViewKind::Assignments { .. }
             | ViewKind::Announcements { .. }
-            | ViewKind::Grades { .. } => scopes.extend([Scope::List, Scope::CourseTabs]),
+            | ViewKind::Grades { .. }
+            | ViewKind::Pages { .. } => scopes.extend([Scope::List, Scope::CourseTabs]),
             // Modules share the Files keys: d, D and e work on module files.
             ViewKind::Files { .. } | ViewKind::Modules { .. } => {
                 scopes.extend([Scope::List, Scope::CourseTabs, Scope::Files])
@@ -3936,6 +3989,26 @@ impl App {
                     title,
                 }
             }
+            ViewKind::Pages {
+                course_id,
+                course_name,
+            } => {
+                let Some(p) = self
+                    .page_lists
+                    .get(course_id)
+                    .and_then(|r| r.data.as_ref())
+                    .and_then(|l| l.get(index))
+                else {
+                    return vec![];
+                };
+                let Some(slug) = p.slug() else { return vec![] };
+                ViewKind::WikiPage {
+                    course_id: course_id.clone(),
+                    course_name: course_name.clone(),
+                    page_url: slug.to_string(),
+                    title: p.title().to_string(),
+                }
+            }
             ViewKind::Detail { .. }
             | ViewKind::Announcement { .. }
             | ViewKind::WikiPage { .. }
@@ -4005,6 +4078,24 @@ impl App {
             }
             ViewKind::CourseHome { course_id, .. } => {
                 Some(format!("{}/courses/{course_id}", self.origin))
+            }
+            ViewKind::Pages { course_id, .. } => {
+                let base = format!("{}/courses/{course_id}/pages", self.origin);
+                let rows = self.visible_rows();
+                let page = rows
+                    .get(self.view().selected)
+                    .and_then(|i| self.page_lists.get(course_id)?.data.as_ref()?.get(*i));
+                Some(match page {
+                    Some(p) => p
+                        .html_url
+                        .clone()
+                        .filter(|u| same_origin(u))
+                        .unwrap_or_else(|| match p.slug() {
+                            Some(slug) => format!("{base}/{slug}"),
+                            None => base.clone(),
+                        }),
+                    None => base,
+                })
             }
             ViewKind::Grades { course_id, .. } => Some(match self.selected_grade_row() {
                 Some(GradeRow::Assignment(_, a)) => a
@@ -4795,7 +4886,8 @@ mod tests {
         let mut app = app_with_courses();
         app.store = Some(store.clone());
         app.update(key(KeyCode::Enter));
-        app.update(key(KeyCode::BackTab)); // Grades, last before Canvas's tabs are known
+        app.update(key(KeyCode::BackTab)); // Pages, last before Canvas's tabs are known
+        app.update(key(KeyCode::BackTab)); // Grades
         app.update(key(KeyCode::BackTab)); // Modules
         let (k, r) = fetch_of(&app.update(key(KeyCode::BackTab)));
         let summary = crate::announcements::Summary {
@@ -4854,7 +4946,8 @@ mod tests {
         ] {
             let mut app = app_with_courses();
             app.update(key(KeyCode::Enter));
-            app.update(key(KeyCode::BackTab)); // Grades, last before Canvas's tabs are known
+            app.update(key(KeyCode::BackTab)); // Pages, last before Canvas's tabs are known
+            app.update(key(KeyCode::BackTab)); // Grades
             app.update(key(KeyCode::BackTab)); // Modules
             let (k, r) = fetch_of(&app.update(key(KeyCode::BackTab)));
             let summary = crate::announcements::Summary {
@@ -5831,5 +5924,78 @@ mod tests {
             feedback: vec![],
         });
         r.version += 1;
+    }
+
+    fn page_summary(url: &str, title: &str, day: u32) -> crate::modules::PageSummary {
+        crate::modules::PageSummary {
+            url: Some(url.into()),
+            title: Some(title.into()),
+            updated_at: Some(
+                chrono::DateTime::parse_from_rfc3339(&format!("2026-10-{day:02}T12:00:00Z"))
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_pages_tab_lists_every_page_and_opens_one_in_the_reader() {
+        let mut app = app_with_courses();
+        app.update(key(KeyCode::Enter));
+        answer(&mut app, tabs_key(), Payload::Tabs(vec![tab("pages")]));
+        assert_eq!(app.course_tabs("10"), [CourseTab::Pages]);
+        assert!(matches!(app.view().kind, ViewKind::Pages { .. }));
+        answer(
+            &mut app,
+            ResourceKey::Pages("10".into()),
+            Payload::Pages(vec![
+                page_summary("week-2", "Week 2", 21),
+                page_summary("week-1", "Week 1", 14),
+            ]),
+        );
+        assert_eq!(app.visible_rows(), [0, 1]);
+        assert_eq!(
+            app.browser_url().unwrap(),
+            format!("{ORIGIN}/courses/10/pages/week-2")
+        );
+        // Searching by title, then opening, reads that page.
+        app.update(key(KeyCode::Char('/')));
+        for c in "week 1".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.visible_rows(), [1]);
+        let effects = app.update(key(KeyCode::Enter));
+        assert_eq!(
+            fetch_of(&effects).0,
+            ResourceKey::WikiPage("10".into(), "week-1".into())
+        );
+        assert!(matches!(app.view().kind, ViewKind::WikiPage { .. }));
+        // Back returns to the list and reads it again, as every list does.
+        let effects = app.update(key(KeyCode::Esc));
+        assert_eq!(fetch_of(&effects).0, ResourceKey::Pages("10".into()));
+    }
+
+    #[test]
+    fn the_page_list_is_saved_and_shown_at_once() {
+        let root = std::env::temp_dir().join(format!("tuicanvas-pagelist-{}", std::process::id()));
+        let store = Arc::new(SnapshotStore::new(&root, "reader"));
+        store.save(
+            &ResourceKey::Pages("10".into()),
+            &vec![page_summary("week-1", "Week 1", 14)],
+            Utc::now(),
+        );
+        let mut app = app_with_courses();
+        app.store = Some(store);
+        app.update(key(KeyCode::Enter));
+        answer(&mut app, tabs_key(), Payload::Tabs(vec![tab("pages")]));
+        // The saved list is there before Canvas answers.
+        assert_eq!(app.visible_rows(), [0]);
+        assert!(matches!(
+            app.page_lists["10"].origin,
+            crate::app::Origin::Cache
+        ));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

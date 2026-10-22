@@ -257,7 +257,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             | ViewKind::Files { .. }
             | ViewKind::Announcements { .. }
             | ViewKind::Modules { .. }
-            | ViewKind::Grades { .. }) => {
+            | ViewKind::Grades { .. }
+            | ViewKind::Pages { .. }) => {
                 let (tab, course_id, _) = kind.tab().expect("a course tab");
                 let course_id = course_id.to_string();
                 let [tabs, body] =
@@ -271,6 +272,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     }
                     CourseTab::Modules => draw_modules(frame, body, app, &course_id, now),
                     CourseTab::Grades => draw_grades(frame, body, app, &course_id, now),
+                    CourseTab::Pages => draw_page_list(frame, body, app, &course_id, now),
                     CourseTab::Home => {} // a page, drawn below
                 }
             }
@@ -390,6 +392,14 @@ fn draw_top(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
             crumbs.push(course_name.clone());
             crumbs.push("Grades".into());
             sync_text(app.grades.get(course_id), app.spinner, now)
+        }
+        ViewKind::Pages {
+            course_id,
+            course_name,
+        } => {
+            crumbs.push(course_name.clone());
+            crumbs.push("Pages".into());
+            sync_text(app.page_lists.get(course_id), app.spinner, now)
         }
         ViewKind::Announcement {
             course_id,
@@ -1322,6 +1332,77 @@ fn draw_modules(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, n
     frame.render_widget(
         Table::new(built, widths)
             .header(Row::new(["Module", "Due", "Points", "Status"]).style(theme::table_header()))
+            .column_spacing(1),
+        area,
+    );
+}
+
+/// The Pages tab: every page of the course, the most recently changed first.
+fn draw_page_list(
+    frame: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    course_id: &str,
+    now: DateTime<Utc>,
+) {
+    if placeholder(frame, area, app.page_lists.get(course_id), "pages") {
+        return;
+    }
+    let rows = app.visible_rows();
+    if rows.is_empty() {
+        empty_message(frame, area, &app.view().filter, "pages");
+        return;
+    }
+    let (start, end) = window(app, rows.len(), usize::from(area.height.saturating_sub(1)));
+    let selected = app.view().selected;
+    let list = app
+        .page_lists
+        .get(course_id)
+        .and_then(|r| r.data.as_deref())
+        .unwrap_or(&[]);
+    let wide = area.width >= 70;
+    let built: Vec<Row> = rows[start..end]
+        .iter()
+        .enumerate()
+        .map(|(i, &index)| {
+            let p = &list[index];
+            let mut title = html::sanitize(p.title());
+            if p.front_page == Some(true) {
+                title.push_str("  (course home)");
+            }
+            let row = Row::new(vec![
+                Cell::from(title),
+                Cell::from(p.updated_at.map(|d| short_date(d, now)).unwrap_or_default())
+                    .style(theme::muted()),
+                Cell::from(if p.locked_for_user == Some(true) {
+                    "Locked"
+                } else {
+                    ""
+                })
+                .style(theme::failed()),
+            ]);
+            if start + i == selected {
+                row.style(theme::selected())
+            } else {
+                row
+            }
+        })
+        .collect();
+    let widths = [
+        Constraint::Fill(1),
+        Constraint::Length(if wide { 20 } else { 0 }),
+        Constraint::Length(if wide { 8 } else { 0 }),
+    ];
+    frame.render_widget(
+        Table::new(built, widths)
+            .header(
+                Row::new([
+                    "Page",
+                    if wide { "Last changed" } else { "" },
+                    if wide { "" } else { "" },
+                ])
+                .style(theme::table_header()),
+            )
             .column_spacing(1),
         area,
     );
@@ -2692,7 +2773,8 @@ mod tests {
         );
         let effects = send(&mut app, KeyCode::Enter);
         deliver(&mut app, effects, Payload::Assignments(vec![]));
-        send(&mut app, KeyCode::BackTab); // Grades, last before Canvas's tabs are known
+        send(&mut app, KeyCode::BackTab); // Pages, last before Canvas's tabs are known
+        send(&mut app, KeyCode::BackTab); // Grades
         send(&mut app, KeyCode::BackTab); // Modules
         let effects = send(&mut app, KeyCode::BackTab);
         let base = crate::announcements::Summary {
@@ -3382,7 +3464,9 @@ mod tests {
         );
         let effects = send(&mut app, KeyCode::Enter);
         deliver(&mut app, effects, Payload::Assignments(vec![]));
-        // Grades is last in the cycle before Canvas's tab list arrives.
+        // Pages is last in the cycle before Canvas's tab list arrives; Grades
+        // is the one before it.
+        send(&mut app, KeyCode::BackTab);
         let effects = send(&mut app, KeyCode::BackTab);
         let graded = |id: &str, name: &str, score: Option<f64>, missing: bool| AssignmentSummary {
             id: id.into(),
@@ -3459,6 +3543,38 @@ mod tests {
         println!("{rendered}\n");
         assert!(rendered.contains("does not show the course total"));
         assert!(rendered.contains("no graded work"));
+
+        #[test]
+        fn the_page_list_renders_titles_dates_and_the_course_home() {
+            let mut app = App::new("https://ufl.instructure.com", None);
+            app.stack = vec![crate::app::View::new(ViewKind::Pages {
+                course_id: "1".into(),
+                course_name: "Course".into(),
+            })];
+            let r = app.page_lists.entry("1".to_string()).or_default();
+            r.data = Some(vec![
+                crate::modules::PageSummary {
+                    url: Some("welcome".into()),
+                    title: Some("Welcome".into()),
+                    updated_at: Some(Utc::now() - chrono::Duration::days(2)),
+                    front_page: Some(true),
+                    ..Default::default()
+                },
+                crate::modules::PageSummary {
+                    url: Some("old-lab".into()),
+                    title: Some("Old lab".into()),
+                    updated_at: Some(Utc::now() - chrono::Duration::days(40)),
+                    locked_for_user: Some(true),
+                    ..Default::default()
+                },
+            ]);
+            r.version += 1;
+            let rendered = screen(&mut app, 100, 12);
+            println!("{rendered}\n");
+            assert!(rendered.contains("Pages") && rendered.contains("Last changed"));
+            assert!(rendered.contains("Welcome") && rendered.contains("(course home)"));
+            assert!(rendered.contains("Old lab") && rendered.contains("Locked"));
+        }
     }
 }
 

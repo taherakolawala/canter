@@ -195,6 +195,34 @@ pub fn valid_slug(slug: &str) -> bool {
 /// page). Never a real page name: those cannot start with a dot.
 pub const FRONT_PAGE: &str = ".front";
 
+/// One course page as the page list gives it, without its text.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct PageSummary {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub front_page: Option<bool>,
+    #[serde(default)]
+    pub locked_for_user: Option<bool>,
+    #[serde(default)]
+    pub html_url: Option<String>,
+}
+
+impl PageSummary {
+    pub fn title(&self) -> &str {
+        self.title.as_deref().unwrap_or("Untitled page")
+    }
+
+    /// The page's URL name, when it is one the reader can ask Canvas for.
+    pub fn slug(&self) -> Option<&str> {
+        self.url.as_deref().filter(|u| valid_slug(u))
+    }
+}
+
 /// A wiki page with its text.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct WikiPage {
@@ -285,6 +313,30 @@ pub async fn list(
     Ok((modules, stats))
 }
 
+/// Every page of the course, newest change first. Canvas leaves unpublished
+/// pages out for students.
+pub async fn pages(
+    client: &CanvasClient,
+    course: &str,
+) -> Result<(Vec<PageSummary>, FetchStats), CanvasError> {
+    check(course)?;
+    let (mut list, stats): (Vec<PageSummary>, _) = client
+        .get_all_pages(
+            &format!("/api/v1/courses/{course}/pages?sort=updated_at&order=desc&per_page=100"),
+            20,
+        )
+        .await?;
+    // A page whose name the reader cannot ask for safely is left out rather
+    // than shown as a row that cannot be opened.
+    list.retain(|p| p.slug().is_some());
+    list.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.title().to_lowercase().cmp(&b.title().to_lowercase()))
+    });
+    Ok((list, stats))
+}
+
 pub async fn page(
     client: &CanvasClient,
     course: &str,
@@ -310,6 +362,35 @@ pub async fn page(
 mod tests {
     use super::*;
     use crate::canvas::tests::{FakeTransport, client, json};
+
+    #[tokio::test]
+    async fn pages_are_newest_first_and_unsafe_names_are_left_out() {
+        let t = FakeTransport::new(vec![json(
+            200,
+            r#"[{"url":"week-2","title":"Week 2","updated_at":"2026-10-20T12:00:00Z"},
+                {"url":"../escape","title":"Bad","updated_at":"2026-10-22T12:00:00Z"},
+                {"url":"syllabus","title":"Syllabus","updated_at":"2026-10-21T12:00:00Z"},
+                {"title":"No name","updated_at":"2026-10-23T12:00:00Z"}]"#,
+        )]);
+        let (list, stats) = pages(&client(t.clone()), "10").await.unwrap();
+        assert_eq!(stats.requests, 1);
+        let names: Vec<&str> = list.iter().map(|p| p.title()).collect();
+        assert_eq!(names, ["Syllabus", "Week 2"]);
+        assert!(
+            t.requests.lock().unwrap()[0]
+                .url
+                .contains("/api/v1/courses/10/pages?sort=updated_at&order=desc")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_page_list_checks_its_course() {
+        let t = FakeTransport::new(vec![]);
+        assert_eq!(
+            pages(&client(t), "../1").await.unwrap_err(),
+            CanvasError::Invalid("invalid course ID")
+        );
+    }
 
     #[tokio::test]
     async fn tabs_drop_hidden_and_follow_canvas_order() {
