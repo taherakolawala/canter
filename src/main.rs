@@ -12,6 +12,7 @@ mod diag;
 mod download;
 mod grades;
 mod html;
+mod images;
 mod keys;
 mod library;
 mod model;
