@@ -11,6 +11,7 @@ mod config;
 mod diag;
 mod download;
 mod html;
+mod inbox;
 mod keys;
 mod library;
 mod model;
