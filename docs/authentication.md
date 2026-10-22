@@ -105,9 +105,15 @@ The page is read in the main frame and in frames of it that are same-origin; a c
 
 The protocol side depends on Edge writing its chosen port and endpoint path to `DevToolsActivePort` in the profile folder, and on `Target.getTargets`, `Target.attachToTarget`, `Runtime.evaluate`, `Input.insertText`, `Storage.getCookies` and `Storage.setCookies`. Those methods have been stable for years, but they are Chromium's, not a standard.
 
+One limit: the browser is closed when sign-in ends, either way, but a reader that is killed outright cannot close it. A sign-in window left behind that way can be closed by hand; the next sign-in reuses the same profile folder.
+
+### Verified live without credentials
+
+Run on 2026-10-22 on the owner's machine, stopping at the password prompt so nothing was sent: Edge was found and started with the dedicated profile, wrote `DevToolsActivePort`, accepted the WebSocket handshake, and answered `Target.getTargets` and `Target.attachToTarget`. The page was navigated to UF's SAML start and read, the GatorLink form was recognised, and the terminal showed `Connecting to Canvas…` then `Sign in with your GatorLink account`. `--login --window` opened its own Edge window and showed `Finish signing in in the sign-in window`. Nothing beyond the public form was exercised.
+
 ### Live verification still to do
 
-The Rust path has had no live run: the owner's credentials were not available, and the tests never touch the network. These are the runs to make, in this order.
+Everything after the form is unverified: filling the password, UF's submit, every Duo screen, reading the cookies, the native check, saving the session, closing the window on success, and each failure case. The owner's credentials were not available, and the tests never touch the network. These are the runs to make, in this order.
 
 ```powershell
 cargo test
