@@ -832,6 +832,10 @@ pub fn dump(config: &Config, out: &Path, course: &str, assignment: &str) -> Resu
     app.library = Some(executor.library.clone());
     let (w, h) = (110u16, 34u16);
     app.size = (w, h);
+    // The dump is a verification tool, so `--course` must be able to reach a
+    // course that is hidden locally. This changes nothing about the saved
+    // choice: it only lists them for this run.
+    app.show_hidden = true;
     let mut terminal = Terminal::new(TestBackend::new(w, h)).map_err(|_| "backend")?;
     std::fs::create_dir_all(out).map_err(|_| "Could not create the dump folder.")?;
     let mut timings = serde_json::Map::new();
@@ -942,6 +946,17 @@ pub fn dump(config: &Config, out: &Path, course: &str, assignment: &str) -> Resu
     }
     let effects = app.update(press(KeyCode::Enter));
     step(&mut app, effects, "3-detail", &mut timings)?;
+    // The instructor's feedback, where this attempt has any: Tab reaches the
+    // section and brings it into view, which the first screen does not show.
+    if app.sections().contains(&crate::app::Section::Feedback) {
+        for _ in 0..5 {
+            if app.focus() == crate::app::Section::Feedback {
+                break;
+            }
+            app.update(press(KeyCode::Tab));
+        }
+        step(&mut app, vec![], "3b-feedback", &mut timings)?;
+    }
     let effects = app.update(press(KeyCode::Esc));
     step(&mut app, effects, "4-back-to-assignments", &mut timings)?;
     // Modules, and the first page in them, when Canvas shows Modules.
