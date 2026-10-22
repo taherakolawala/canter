@@ -74,6 +74,8 @@ pub enum Payload {
     Tabs(Vec<crate::modules::Tab>),
     Modules(Vec<crate::modules::Module>),
     WikiPage(Box<crate::modules::WikiPage>),
+    Conversations(Vec<crate::inbox::Summary>),
+    Conversation(Box<crate::inbox::Detail>),
 }
 
 /// One row of the Modules screen: a module's heading or one of its items.
@@ -313,6 +315,8 @@ pub enum Section {
     Calendar,
     /// The selected day's entries, listed under the grid.
     Day,
+    /// The Inbox, beside the calendar on the home screen.
+    Inbox,
 }
 
 /// The actions menu (`Space`).
@@ -330,6 +334,8 @@ pub enum Page {
     Announcement(String, String),
     /// A course wiki page: course id and the page's URL name.
     Wiki(String, String),
+    /// An Inbox conversation, by its id.
+    Conversation(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -376,6 +382,11 @@ pub enum ViewKind {
         course_id: String,
         course_name: String,
     },
+    /// One Inbox conversation, opened from the home screen's Inbox.
+    Conversation {
+        conversation_id: String,
+        subject: String,
+    },
 }
 
 impl ViewKind {
@@ -399,6 +410,9 @@ impl ViewKind {
                 page_url,
                 ..
             } => Some(Page::Wiki(course_id.clone(), page_url.clone())),
+            ViewKind::Conversation {
+                conversation_id, ..
+            } => Some(Page::Conversation(conversation_id.clone())),
             _ => None,
         }
     }
@@ -506,6 +520,9 @@ impl View {
                 ..
             } => ResourceKey::WikiPage(course_id.clone(), page_url.clone()),
             ViewKind::CourseHome { course_id, .. } => ResourceKey::Tabs(course_id.clone()),
+            ViewKind::Conversation {
+                conversation_id, ..
+            } => ResourceKey::Conversation(conversation_id.clone()),
         }
     }
 }
@@ -584,6 +601,16 @@ pub struct App {
     pub wiki_render: Option<DetailRender>,
     /// Module files waiting for their details (and their course's folders).
     module_waiting: HashMap<String, ModuleFile>,
+    /// Inbox conversation lists, by folder name.
+    pub conversations: HashMap<String, Resource<Vec<crate::inbox::Summary>>>,
+    pub conversation_details: HashMap<String, Resource<crate::inbox::Detail>>,
+    pub conversation_render: Option<DetailRender>,
+    /// Conversations read here. Canvas is never told; see `src/inbox.rs`.
+    conversation_reads: std::collections::BTreeSet<String>,
+    /// The Inbox folder shown on the home screen.
+    pub inbox_folder: crate::inbox::Folder,
+    /// The selected conversation in that folder.
+    pub inbox_item: usize,
 }
 
 fn matches_filter(text: &str, filter: &str) -> bool {
@@ -627,6 +654,10 @@ impl App {
         let hidden_courses = store
             .as_ref()
             .map(|s| s.hidden_courses())
+            .unwrap_or_default();
+        let conversation_reads = store
+            .as_ref()
+            .map(|s| s.conversation_reads())
             .unwrap_or_default();
         App {
             origin: origin.to_string(),
@@ -673,6 +704,12 @@ impl App {
             wiki_pages: HashMap::new(),
             wiki_render: None,
             module_waiting: HashMap::new(),
+            conversations: HashMap::new(),
+            conversation_details: HashMap::new(),
+            conversation_render: None,
+            conversation_reads,
+            inbox_folder: crate::inbox::Folder::default(),
+            inbox_item: 0,
         }
     }
 
@@ -713,6 +750,8 @@ impl App {
                 .wiki_pages
                 .get(&(c.clone(), u.clone()))
                 .map(|r| &r.sync),
+            ResourceKey::Conversations(f) => self.conversations.get(f).map(|r| &r.sync),
+            ResourceKey::Conversation(c) => self.conversation_details.get(c).map(|r| &r.sync),
         }
     }
 
@@ -753,6 +792,12 @@ impl App {
                     .or_default()
                     .sync = sync
             }
+            ResourceKey::Conversations(f) => {
+                self.conversations.entry(f.clone()).or_default().sync = sync
+            }
+            ResourceKey::Conversation(c) => {
+                self.conversation_details.entry(c.clone()).or_default().sync = sync
+            }
         }
     }
 
@@ -769,6 +814,7 @@ impl App {
         self.load_snapshot(&key);
         self.clamp_selection();
         self.mark_current_announcement_read();
+        self.mark_current_conversation_read();
         self.dirty = true;
         // Course tabs are read once per run, not on every visit.
         let mut effects: Vec<Effect> = match key {
@@ -779,9 +825,11 @@ impl App {
             let course_id = course_id.to_string();
             effects.extend(self.read_tabs(&course_id, explicit));
         }
-        // The calendar is part of the home screen: read it with the course list.
+        // The calendar and the Inbox are part of the home screen: read them
+        // with the course list.
         if self.view().kind == ViewKind::Courses {
             effects.extend(self.read_calendar(explicit));
+            effects.extend(self.read_inbox(explicit));
         }
         // Past submissions are part of the assignment page: read them with it
         // when the copy on hand shows something was submitted.
@@ -939,6 +987,28 @@ impl App {
             }
             ResourceKey::WikiPage(c, u) => {
                 let res = self.wiki_pages.entry((c.clone(), u.clone())).or_default();
+                if res.data.is_none()
+                    && let Some((data, at)) = store.load(key)
+                {
+                    res.data = Some(data);
+                    res.fetched_at = Some(at);
+                    res.origin = Origin::Cache;
+                    res.version += 1;
+                }
+            }
+            ResourceKey::Conversations(f) => {
+                let res = self.conversations.entry(f.clone()).or_default();
+                if res.data.is_none()
+                    && let Some((data, at)) = store.load(key)
+                {
+                    res.data = Some(data);
+                    res.fetched_at = Some(at);
+                    res.origin = Origin::Cache;
+                    res.version += 1;
+                }
+            }
+            ResourceKey::Conversation(c) => {
+                let res = self.conversation_details.entry(c.clone()).or_default();
                 if res.data.is_none()
                     && let Some((data, at)) = store.load(key)
                 {
@@ -1208,6 +1278,24 @@ impl App {
                         r.sync = SyncState::Idle;
                         r.version += 1;
                     }
+                    (Payload::Conversations(list), ResourceKey::Conversations(f)) => {
+                        let r = self.conversations.entry(f.clone()).or_default();
+                        r.data = Some(list);
+                        r.origin = Origin::Network;
+                        r.fetched_at = Some(at);
+                        r.sync = SyncState::Idle;
+                        r.version += 1;
+                        let n = self.inbox_rows().len();
+                        self.inbox_item = self.inbox_item.min(n.saturating_sub(1));
+                    }
+                    (Payload::Conversation(detail), ResourceKey::Conversation(c)) => {
+                        let r = self.conversation_details.entry(c.clone()).or_default();
+                        r.data = Some(*detail);
+                        r.origin = Origin::Network;
+                        r.fetched_at = Some(at);
+                        r.sync = SyncState::Idle;
+                        r.version += 1;
+                    }
                     (Payload::WikiPage(page), ResourceKey::WikiPage(c, u)) => {
                         let r = self.wiki_pages.entry((c.clone(), u.clone())).or_default();
                         r.data = Some(*page);
@@ -1223,6 +1311,7 @@ impl App {
                 }
                 self.clamp_selection();
                 self.mark_current_announcement_read();
+                self.mark_current_conversation_read();
                 effects
             }
             Err(error) => {
@@ -1307,7 +1396,8 @@ impl App {
             ViewKind::Detail { .. }
             | ViewKind::Announcement { .. }
             | ViewKind::WikiPage { .. }
-            | ViewKind::CourseHome { .. } => vec![],
+            | ViewKind::CourseHome { .. }
+            | ViewKind::Conversation { .. } => vec![],
             ViewKind::Files { .. } => (0..self.file_rows().len()).collect(),
             ViewKind::Modules { course_id, .. } => self.visible_modules(course_id, &view.filter),
         }
@@ -1513,7 +1603,10 @@ impl App {
     fn is_list(&self) -> bool {
         !matches!(
             self.view().kind,
-            ViewKind::Detail { .. } | ViewKind::Announcement { .. } | ViewKind::WikiPage { .. }
+            ViewKind::Detail { .. }
+                | ViewKind::Announcement { .. }
+                | ViewKind::WikiPage { .. }
+                | ViewKind::Conversation { .. }
         )
     }
 
@@ -2214,6 +2307,7 @@ impl App {
             ViewKind::Courses => match self.focus() {
                 Section::Calendar => scopes.extend([Scope::Courses, Scope::Calendar]),
                 Section::Day => scopes.extend([Scope::Courses, Scope::Day]),
+                Section::Inbox => scopes.extend([Scope::Courses, Scope::Inbox]),
                 _ => scopes.extend([Scope::List, Scope::Courses]),
             },
             ViewKind::Assignments { .. } | ViewKind::Announcements { .. } => {
@@ -2224,7 +2318,10 @@ impl App {
                 scopes.extend([Scope::List, Scope::CourseTabs, Scope::Files])
             }
             ViewKind::CourseHome { .. } => {}
-            ViewKind::Detail { .. } | ViewKind::Announcement { .. } | ViewKind::WikiPage { .. } => {
+            ViewKind::Detail { .. }
+            | ViewKind::Announcement { .. }
+            | ViewKind::WikiPage { .. }
+            | ViewKind::Conversation { .. } => {
                 scopes.push(Scope::Page);
                 // On a course's Home, Tab moves between the course's tabs.
                 scopes.push(if view.kind.tab().is_some() {
@@ -2238,20 +2335,24 @@ impl App {
                 if !self.current_links().is_empty() {
                     scopes.push(Scope::HasLinks);
                 }
+                if matches!(view.kind, ViewKind::Conversation { .. }) {
+                    scopes.push(Scope::Conversation);
+                }
                 match self.focus() {
                     Section::Links => scopes.push(Scope::Links),
                     Section::Submissions => scopes.push(Scope::Submissions),
-                    Section::Text | Section::Calendar | Section::Day => {}
+                    Section::Text | Section::Calendar | Section::Day | Section::Inbox => {}
                 }
             }
         }
         scopes
     }
 
-    /// Sections the current page has, in order: text, files & links, submissions.
+    /// Sections the current page has, in order: text, files & links,
+    /// submissions. On the home screen: the courses, the calendar, the Inbox.
     pub fn sections(&self) -> Vec<Section> {
         if self.view().kind == ViewKind::Courses {
-            return vec![Section::Text, Section::Calendar];
+            return vec![Section::Text, Section::Calendar, Section::Inbox];
         }
         let Some(page) = self.view().kind.page() else {
             return vec![];
@@ -2299,6 +2400,7 @@ impl App {
             Page::Assignment(c, a) => self.links_of(c, a),
             Page::Announcement(c, a) => self.announcement_links(c, a),
             Page::Wiki(c, u) => self.wiki_links(c, u),
+            Page::Conversation(id) => self.conversation_links(id),
         }
     }
 
@@ -2307,6 +2409,7 @@ impl App {
             Page::Assignment(c, a) => self.detail_dir(c, a),
             Page::Announcement(c, a) => self.announcement_dir(c, a),
             Page::Wiki(c, u) => self.wiki_dir(c, u),
+            Page::Conversation(id) => self.conversation_dir(id),
         }
     }
 
@@ -2338,6 +2441,7 @@ impl App {
                 (None, Section::Calendar | Section::Day) => {
                     !self.day_items(self.calendar_day).is_empty()
                 }
+                (None, Section::Inbox) => !self.inbox_rows().is_empty(),
                 (None, _) => !self.visible_rows().is_empty(),
             },
             Act::Download => match self.view().kind {
@@ -2758,6 +2862,9 @@ impl App {
         if self.view().kind == ViewKind::Courses && self.focus() == Section::Calendar {
             return self.move_day(act);
         }
+        if self.focus() == Section::Inbox && matches!(act, Act::Left | Act::Right) {
+            return self.move_folder(act == Act::Right);
+        }
         if matches!(act, Act::Left | Act::Right) {
             return vec![];
         }
@@ -2774,6 +2881,12 @@ impl App {
             let n = self.day_items(self.calendar_day).len();
             self.day_item =
                 (self.day_item as isize + delta).clamp(0, n.saturating_sub(1) as isize) as usize;
+            return vec![];
+        }
+        if self.focus() == Section::Inbox {
+            let n = self.inbox_rows().len();
+            self.inbox_item =
+                (self.inbox_item as isize + delta).clamp(0, n.saturating_sub(1) as isize) as usize;
             return vec![];
         }
         if self.is_list() {
@@ -2793,7 +2906,7 @@ impl App {
             Section::Text => view.scroll = (view.scroll as isize + delta).max(0) as usize,
             Section::Links => view.link = step(view.link),
             Section::Submissions => view.attempt = step(view.attempt),
-            Section::Calendar | Section::Day => {}
+            Section::Calendar | Section::Day | Section::Inbox => {}
         }
         vec![]
     }
@@ -2832,6 +2945,49 @@ impl App {
         let mut effects: Vec<Effect> = self.request(month, explicit).into_iter().collect();
         effects.extend(self.request(ResourceKey::Colors, explicit));
         effects
+    }
+
+    /// Read the Inbox folder shown on the home screen.
+    fn read_inbox(&mut self, explicit: bool) -> Vec<Effect> {
+        let key = ResourceKey::Conversations(self.inbox_folder.id().to_string());
+        self.load_snapshot(&key);
+        self.request(key, explicit).into_iter().collect()
+    }
+
+    /// The conversations of the folder shown, newest activity first.
+    pub fn inbox_rows(&self) -> &[crate::inbox::Summary] {
+        self.conversations
+            .get(self.inbox_folder.id())
+            .and_then(|r| r.data.as_deref())
+            .unwrap_or(&[])
+    }
+
+    pub fn inbox_resource(&self) -> Option<&Resource<Vec<crate::inbox::Summary>>> {
+        self.conversations.get(self.inbox_folder.id())
+    }
+
+    pub fn selected_conversation(&self) -> Option<&crate::inbox::Summary> {
+        self.inbox_rows().get(self.inbox_item)
+    }
+
+    /// `←`/`→` on the Inbox: another folder, read when it is shown.
+    fn move_folder(&mut self, forward: bool) -> Vec<Effect> {
+        self.inbox_folder = self.inbox_folder.step(forward);
+        self.inbox_item = 0;
+        self.read_inbox(false)
+    }
+
+    /// `Enter` on the Inbox: open the selected conversation here.
+    fn open_conversation(&mut self) -> Vec<Effect> {
+        let Some(conversation) = self.selected_conversation() else {
+            return vec![];
+        };
+        let next = ViewKind::Conversation {
+            conversation_id: conversation.id.clone(),
+            subject: conversation.subject().to_string(),
+        };
+        self.stack.push(View::new(next));
+        self.enter_current(false)
     }
 
     /// Next or previous section of a page; the text is always first.
@@ -3016,6 +3172,7 @@ impl App {
         }
         if self.view().kind == ViewKind::Courses {
             effects.extend(self.read_calendar(true));
+            effects.extend(self.read_inbox(true));
         }
         if let ViewKind::Detail {
             course_id,
@@ -3046,6 +3203,15 @@ impl App {
                     self.place_announcement_file(&id, dir, true)
                 }
                 _ => self.activate_link(c, "", link),
+            },
+            // A conversation belongs to no course, so a file in it is placed
+            // by the same lazy-metadata path as an announcement's.
+            Page::Conversation(id) => match &link.target {
+                Target::File { id: file_id } => {
+                    let (file_id, dir) = (file_id.clone(), self.conversation_dir(id));
+                    self.place_announcement_file(&file_id, dir, true)
+                }
+                _ => self.activate_link("", "", link),
             },
         }
     }
@@ -3097,7 +3263,7 @@ impl App {
                 let dir = self.page_dir(&page);
                 match page {
                     Page::Assignment(..) => self.place_from(&id, dir, false),
-                    Page::Announcement(..) | Page::Wiki(..) => {
+                    Page::Announcement(..) | Page::Wiki(..) | Page::Conversation(..) => {
                         self.place_announcement_file(&id, dir, false)
                     }
                 }
@@ -3170,7 +3336,7 @@ impl App {
                 let batch = ids.into_iter().map(|id| (id, dir.clone())).collect();
                 self.download_batch(batch)
             }
-            Page::Announcement(..) | Page::Wiki(..) => {
+            Page::Announcement(..) | Page::Wiki(..) | Page::Conversation(..) => {
                 let mut effects = Vec::new();
                 for id in ids {
                     effects.extend(self.place_announcement_file(&id, Some(dir.clone()), false));
@@ -3327,6 +3493,85 @@ impl App {
                 store.save_announcement_reads(&self.announcement_reads);
             }
         }
+    }
+
+    /// What the Inbox shows for a conversation: read here, else Canvas's own
+    /// state. Reading here never changes Canvas's.
+    pub fn conversation_status(&self, summary: &crate::inbox::Summary) -> &'static str {
+        if self.conversation_reads.contains(&summary.id) {
+            "Read"
+        } else {
+            summary.status()
+        }
+    }
+
+    /// An open conversation whose messages are on hand counts as read. This
+    /// is recorded locally only; Canvas is never told.
+    fn mark_current_conversation_read(&mut self) {
+        let ViewKind::Conversation {
+            conversation_id, ..
+        } = &self.view().kind
+        else {
+            return;
+        };
+        let id = conversation_id.clone();
+        let readable = self
+            .conversation_details
+            .get(&id)
+            .and_then(|r| r.data.as_ref())
+            .is_some_and(|d| !d.messages.is_empty());
+        if readable
+            && self.conversation_reads.insert(id)
+            && let Some(store) = &self.store
+        {
+            store.save_conversation_reads(&self.conversation_reads);
+        }
+    }
+
+    /// The conversation as one HTML document: the text and the files & links
+    /// list are built from the same document, so their numbering agrees.
+    pub fn conversation_document(&self, id: &str) -> String {
+        self.conversation_details
+            .get(id)
+            .and_then(|r| r.data.as_ref())
+            .map(crate::inbox::Detail::document)
+            .unwrap_or_default()
+    }
+
+    pub fn conversation_links(&self, id: &str) -> Vec<Link> {
+        let Some(detail) = self
+            .conversation_details
+            .get(id)
+            .and_then(|r| r.data.as_ref())
+        else {
+            return vec![];
+        };
+        let mut links = crate::html::links(&detail.document(), &self.origin);
+        for f in detail.attachments() {
+            if crate::model::valid_id(&f.id)
+                && !links
+                    .iter()
+                    .any(|l| matches!(&l.target, Target::File {id} if id == &f.id))
+            {
+                links.push(Link {
+                    text: crate::html::sanitize(f.name()),
+                    url: format!("{}/files/{}", self.origin, f.id),
+                    target: Target::File { id: f.id.clone() },
+                    image: false,
+                });
+            }
+        }
+        links
+    }
+
+    /// Where a conversation's files go. Conversations are not a course's, so
+    /// they sit in one folder of their own under the library root.
+    pub fn conversation_dir(&self, id: &str) -> Option<PathBuf> {
+        let lib = self.library.as_ref()?;
+        if !crate::model::valid_id(id) {
+            return None;
+        }
+        Some(lib.root().join("Inbox Files").join(id))
     }
 
     pub fn announcement_links(&self, course_id: &str, id: &str) -> Vec<Link> {
@@ -3622,6 +3867,9 @@ impl App {
         if matches!(self.focus(), Section::Calendar | Section::Day) {
             return self.open_calendar_item();
         }
+        if self.focus() == Section::Inbox {
+            return self.open_conversation();
+        }
         let rows = self.visible_rows();
         let Some(&index) = rows.get(self.view().selected) else {
             return vec![];
@@ -3690,7 +3938,8 @@ impl App {
             ViewKind::Detail { .. }
             | ViewKind::Announcement { .. }
             | ViewKind::WikiPage { .. }
-            | ViewKind::CourseHome { .. } => return vec![],
+            | ViewKind::CourseHome { .. }
+            | ViewKind::Conversation { .. } => return vec![],
             ViewKind::Files {
                 course_id,
                 course_name,
@@ -3756,6 +4005,20 @@ impl App {
             }
             ViewKind::CourseHome { course_id, .. } => {
                 Some(format!("{}/courses/{course_id}", self.origin))
+            }
+            ViewKind::Conversation {
+                conversation_id, ..
+            } => {
+                if let Some(link) = self.selected_link() {
+                    return Some(link.url);
+                }
+                Some(format!("{}/conversations/{conversation_id}", self.origin))
+            }
+            ViewKind::Courses if self.focus() == Section::Inbox => {
+                Some(match self.selected_conversation() {
+                    Some(c) => format!("{}/conversations/{}", self.origin, c.id),
+                    None => format!("{}/conversations", self.origin),
+                })
             }
             ViewKind::Announcements { course_id, .. } => {
                 let base = format!("{}/courses/{course_id}/announcements", self.origin);
@@ -4583,6 +4846,264 @@ mod tests {
         );
         assert_eq!(other.announcement_status("10", &summary), "Unread");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    // ---- The Inbox ----
+
+    fn conversation(id: &str, subject: &str, state: &str) -> crate::inbox::Summary {
+        crate::inbox::Summary {
+            id: id.into(),
+            subject: Some(subject.into()),
+            workflow_state: Some(state.into()),
+            last_message_at: Some(Utc::now()),
+            participants: vec![crate::inbox::Participant {
+                id: "7".into(),
+                name: Some("Dr Ada".into()),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// The in-flight request for the Inbox folder shown.
+    fn pending_inbox(app: &App) -> u64 {
+        match app.conversations[app.inbox_folder.id()].sync {
+            SyncState::Syncing { request, .. } => request,
+            ref other => panic!("expected the Inbox to be syncing, got {other:?}"),
+        }
+    }
+
+    /// The home screen with the Inbox focused and one conversation listed.
+    fn inbox_app(library: Option<Arc<Library>>) -> App {
+        let mut app = app_with_courses();
+        app.library = library;
+        // Tab moves Courses -> Calendar -> Inbox.
+        app.update(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Section::Calendar);
+        app.update(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Section::Inbox);
+        let request = pending_inbox(&app);
+        deliver(
+            &mut app,
+            ResourceKey::Conversations("inbox".into()),
+            request,
+            Payload::Conversations(vec![conversation("5", "Lab 3 feedback", "unread")]),
+        );
+        app
+    }
+
+    #[test]
+    fn the_inbox_is_a_home_section_with_every_folder_and_opens_a_conversation() {
+        let mut app = inbox_app(None);
+        assert!(app.scopes().contains(&Scope::Inbox));
+        assert_eq!(app.inbox_rows().len(), 1);
+        assert_eq!(app.selected_conversation().unwrap().id, "5");
+        assert!(app.browser_url().unwrap().ends_with("/conversations/5"));
+
+        // Right and left reach every folder, each read as it is shown.
+        let step = |app: &mut App, code: KeyCode| {
+            let (k, r) = fetch_of(&app.update(key(code)));
+            assert_eq!(k, ResourceKey::Conversations(app.inbox_folder.id().into()));
+            deliver(app, k, r, Payload::Conversations(vec![]));
+            app.inbox_folder.id().to_string()
+        };
+        let mut seen = vec!["inbox".to_string()];
+        for _ in 1..crate::inbox::Folder::ALL.len() {
+            seen.push(step(&mut app, KeyCode::Right));
+        }
+        assert_eq!(seen, ["inbox", "unread", "starred", "sent", "archived"]);
+        // A folder with nothing in it has nothing to open.
+        assert!(!app.screen_available(Act::Open));
+        assert!(app.update(key(KeyCode::Enter)).is_empty());
+        // Past the end it cycles round, and Left goes back the other way.
+        assert_eq!(step(&mut app, KeyCode::Right), "inbox");
+        assert_eq!(step(&mut app, KeyCode::Left), "archived");
+        // Back to the Inbox, read again, listing its conversation.
+        let (k, r) = fetch_of(&app.update(key(KeyCode::Right)));
+        assert_eq!(k, ResourceKey::Conversations("inbox".into()));
+        deliver(
+            &mut app,
+            k,
+            r,
+            Payload::Conversations(vec![conversation("5", "Lab 3 feedback", "unread")]),
+        );
+
+        // Enter opens the conversation as a page of its own.
+        let (k, r) = fetch_of(&app.update(key(KeyCode::Enter)));
+        assert_eq!(k, ResourceKey::Conversation("5".into()));
+        assert_eq!(
+            app.view().kind,
+            ViewKind::Conversation {
+                conversation_id: "5".into(),
+                subject: "Lab 3 feedback".into()
+            }
+        );
+        let detail = crate::inbox::Detail {
+            base: conversation("5", "Lab 3 feedback", "unread"),
+            messages: vec![crate::inbox::Message {
+                id: "9".into(),
+                created_at: Some(Utc::now()),
+                body: Some("Notes are attached.".into()),
+                author_id: Some("7".into()),
+                attachments: vec![canvas_file("9", "notes.pdf", "1")],
+                ..Default::default()
+            }],
+        };
+        deliver(&mut app, k, r, Payload::Conversation(Box::new(detail)));
+        assert!(app.scopes().contains(&Scope::Conversation));
+        assert!(app.scopes().contains(&Scope::Sections));
+        // The messages, their author and date, and the attachment.
+        let text = app.conversation_document("5");
+        assert!(text.contains("Dr Ada"), "{text}");
+        assert!(text.contains("Notes are attached."), "{text}");
+        let links = app.conversation_links("5");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target, Target::File { id: "9".into() });
+        assert!(app.browser_url().unwrap().ends_with("/conversations/5"));
+        // Esc leaves the page; the home screen is a new visit.
+        assert_eq!(
+            fetch_of(&app.update(key(KeyCode::Esc))).0,
+            ResourceKey::Courses
+        );
+        assert_eq!(app.focus(), Section::Inbox);
+    }
+
+    #[test]
+    fn conversation_files_are_downloaded_only_when_chosen() {
+        let (lib, root) = temp_library("inbox-files");
+        let mut app = inbox_app(Some(lib));
+        let (k, r) = fetch_of(&app.update(key(KeyCode::Enter)));
+        let detail = crate::inbox::Detail {
+            base: conversation("5", "Lab 3 feedback", "unread"),
+            messages: vec![crate::inbox::Message {
+                id: "9".into(),
+                created_at: Some(Utc::now()),
+                body: Some("<img src='/courses/10/files/12/preview'>".into()),
+                author_id: Some("7".into()),
+                attachments: vec![canvas_file("9", "notes.pdf", "1")],
+                ..Default::default()
+            }],
+        };
+        // Reading the conversation downloads nothing, not even its image.
+        let effects = {
+            deliver(&mut app, k, r, Payload::Conversation(Box::new(detail)));
+            app.update(Msg::Tick)
+        };
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Download { .. })),
+            "{effects:?}"
+        );
+        assert_eq!(app.conversation_links("5").len(), 2);
+        // Choosing one reads its details first, then downloads it.
+        app.update(key(KeyCode::Tab)); // to the files & links
+        assert_eq!(app.focus(), Section::Links);
+        let effects = app.update(key(KeyCode::Char('d')));
+        let (k, r) = fetch_of(&effects);
+        assert_eq!(k, ResourceKey::File("12".into()));
+        let effects = app.update(Msg::Fetched {
+            key: k,
+            request: r,
+            result: Ok((
+                Payload::File(Box::new(canvas_file("12", "chart.png", "1"))),
+                FetchStats::default(),
+            )),
+            at: Utc::now(),
+        });
+        let Some(Effect::Download { target, .. }) = effects
+            .iter()
+            .find(|e| matches!(e, Effect::Download { .. }))
+        else {
+            panic!("expected a download, got {effects:?}")
+        };
+        assert!(
+            target.starts_with(root.join("Inbox Files").join("5")),
+            "{}",
+            target.display()
+        );
+        // A conversation id that could escape the library gets no folder.
+        assert!(app.conversation_dir("../etc").is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn conversations_read_here_are_never_reported_to_canvas() {
+        let root = std::env::temp_dir().join(format!("tuicanvas-inbox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Arc::new(SnapshotStore::new(&root, "reader"));
+        let mut app = inbox_app(None);
+        app.store = Some(store.clone());
+        let summary = conversation("5", "Lab 3 feedback", "unread");
+        assert_eq!(app.conversation_status(&summary), "Unread");
+        // Opening it asks Canvas for the conversation and for nothing else:
+        // no write, and no second request that would change its state.
+        let effects = app.update(key(KeyCode::Enter));
+        assert_eq!(effects.len(), 1, "{effects:?}");
+        let (k, r) = fetch_of(&effects);
+        assert_eq!(k, ResourceKey::Conversation("5".into()));
+        // Still unread until its messages are actually on screen.
+        assert_eq!(app.conversation_status(&summary), "Unread");
+        let detail = crate::inbox::Detail {
+            base: summary.clone(),
+            messages: vec![crate::inbox::Message {
+                id: "9".into(),
+                body: Some("Read me".into()),
+                ..Default::default()
+            }],
+        };
+        deliver(&mut app, k, r, Payload::Conversation(Box::new(detail)));
+        assert_eq!(app.conversation_status(&summary), "Read");
+        // A later refresh still reports Canvas's own unread state, and the
+        // reader keeps showing Read.
+        let (k, r) = fetch_of(&app.update(key(KeyCode::Esc)));
+        assert_eq!(k, ResourceKey::Courses);
+        deliver(&mut app, k, r, Payload::Courses(vec![]));
+        let request = pending_inbox(&app);
+        deliver(
+            &mut app,
+            ResourceKey::Conversations("inbox".into()),
+            request,
+            Payload::Conversations(vec![summary.clone()]),
+        );
+        assert_eq!(app.conversation_status(&summary), "Read");
+        assert_eq!(
+            app.conversations["inbox"].data.as_ref().unwrap()[0]
+                .workflow_state
+                .as_deref(),
+            Some("unread"),
+            "Canvas's own state is left as Canvas reports it"
+        );
+        // It survives a restart and belongs to this account only.
+        let restarted = App::new(&app.origin, Some(store));
+        assert_eq!(restarted.conversation_status(&summary), "Read");
+        let other = App::new(
+            &app.origin,
+            Some(Arc::new(SnapshotStore::new(&root, "other"))),
+        );
+        assert_eq!(other.conversation_status(&summary), "Unread");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_empty_or_failed_conversation_is_not_marked_read() {
+        for fail in [false, true] {
+            let mut app = inbox_app(None);
+            let summary = conversation("5", "Lab 3 feedback", "unread");
+            let (k, r) = fetch_of(&app.update(key(KeyCode::Enter)));
+            if fail {
+                app.update(Msg::Fetched {
+                    key: k,
+                    request: r,
+                    result: Err(CanvasError::NoAccess(403)),
+                    at: Utc::now(),
+                });
+            } else {
+                let detail = crate::inbox::Detail {
+                    base: summary.clone(),
+                    messages: vec![],
+                };
+                deliver(&mut app, k, r, Payload::Conversation(Box::new(detail)));
+            }
+            assert_eq!(app.conversation_status(&summary), "Unread");
+        }
     }
 
     #[test]

@@ -30,6 +30,10 @@ pub enum ResourceKey {
     Modules(String),
     /// A course wiki page, by its URL name.
     WikiPage(String, String),
+    /// One folder of the Inbox, by its name (`inbox`, `unread`, ...).
+    Conversations(String),
+    /// One Inbox conversation with its messages.
+    Conversation(String),
 }
 
 impl ResourceKey {
@@ -64,6 +68,12 @@ impl ResourceKey {
             ResourceKey::WikiPage(c, u) if ok(c) && crate::modules::valid_slug(u) => {
                 format!("page-{}-{u}", c.replace('~', "_"))
             }
+            ResourceKey::Conversations(f) if crate::inbox::Folder::of_id(f).is_some() => {
+                format!("conversations-{f}")
+            }
+            ResourceKey::Conversation(c) if ok(c) => {
+                format!("conversation-{}", c.replace('~', "_"))
+            }
             _ => return None,
         };
         Some(name + ".json")
@@ -84,6 +94,8 @@ impl ResourceKey {
             ResourceKey::Tabs(_) => "course tabs",
             ResourceKey::Modules(_) => "modules",
             ResourceKey::WikiPage(..) => "page",
+            ResourceKey::Conversations(_) => "inbox",
+            ResourceKey::Conversation(_) => "conversation",
         }
     }
 }
@@ -167,6 +179,54 @@ impl SnapshotStore {
         self.save_named("local-announcement-reads.json", reads, Utc::now());
     }
 
+    /// Conversations read in TUICanvas. Canvas is never told, so this is the
+    /// only record of it and it is kept apart from refreshed snapshots.
+    pub fn conversation_reads(&self) -> std::collections::BTreeSet<String> {
+        self.load_named("local-conversation-reads.json")
+            .map(|(reads, _)| reads)
+            .unwrap_or_default()
+    }
+
+    pub fn save_conversation_reads(&self, reads: &std::collections::BTreeSet<String>) {
+        self.save_named("local-conversation-reads.json", reads, Utc::now());
+    }
+
+    /// Keep the saved conversation bodies within `limit` messages in total,
+    /// removing the least recently read ones first. Conversation lists are
+    /// capped where they are read (`crate::inbox::MAX_CONVERSATIONS`).
+    pub fn prune_conversations(&self, limit: usize) {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        let mut saved: Vec<(DateTime<Utc>, usize, PathBuf)> = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !(name.starts_with("conversation-") && name.ends_with(".json")) {
+                continue;
+            }
+            let path = entry.path();
+            // Counted from the stored JSON so this stays independent of the type.
+            let Some((data, at)) = self.load_named::<serde_json::Value>(&name) else {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            };
+            let count = data
+                .get("messages")
+                .and_then(|m| m.as_array())
+                .map_or(0, Vec::len);
+            saved.push((at, count, path));
+        }
+        saved.sort_by_key(|s| std::cmp::Reverse(s.0));
+        let mut kept = 0;
+        for (_, count, path) in saved {
+            if kept + count <= limit {
+                kept += count;
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
     /// Local course visibility does not change Canvas enrollment or its course snapshot.
     pub fn hidden_courses(&self) -> std::collections::BTreeSet<String> {
         self.load_named("local-hidden-courses.json")
@@ -218,5 +278,85 @@ mod tests {
                 .unwrap(),
             "assignment-1_2-3.json"
         );
+        assert!(
+            ResourceKey::Conversations("../drafts".into())
+                .file_name()
+                .is_none()
+        );
+        assert_eq!(
+            ResourceKey::Conversations("unread".into())
+                .file_name()
+                .unwrap(),
+            "conversations-unread.json"
+        );
+        assert!(
+            ResourceKey::Conversation("a/b".into())
+                .file_name()
+                .is_none()
+        );
+        assert_eq!(
+            ResourceKey::Conversation("5".into()).file_name().unwrap(),
+            "conversation-5.json"
+        );
+    }
+
+    #[test]
+    fn local_conversation_reads_are_account_scoped_and_outlive_snapshots() {
+        let root = temp_root("inbox-reads");
+        let store = SnapshotStore::new(&root, "100");
+        assert!(store.conversation_reads().is_empty());
+        let reads: std::collections::BTreeSet<String> = ["5".to_string(), "9".to_string()].into();
+        store.save_conversation_reads(&reads);
+        assert_eq!(store.conversation_reads(), reads);
+        assert!(
+            SnapshotStore::new(&root, "200")
+                .conversation_reads()
+                .is_empty()
+        );
+        store.clear();
+        assert!(store.conversation_reads().is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn saved_conversations_stay_within_the_message_cap() {
+        let root = temp_root("inbox-prune");
+        let store = SnapshotStore::new(&root, "100");
+        let body = |n: usize| serde_json::json!({"messages": vec![0; n]});
+        let now = Utc::now();
+        // Newest first: 5 + 4 fit in 10, the oldest does not.
+        store.save(&ResourceKey::Conversation("1".into()), &body(5), now);
+        store.save(
+            &ResourceKey::Conversation("2".into()),
+            &body(4),
+            now - chrono::Duration::minutes(1),
+        );
+        store.save(
+            &ResourceKey::Conversation("3".into()),
+            &body(6),
+            now - chrono::Duration::minutes(2),
+        );
+        store.prune_conversations(10);
+        let kept = |id: &str| {
+            store
+                .load::<serde_json::Value>(&ResourceKey::Conversation(id.into()))
+                .is_some()
+        };
+        assert!(kept("1") && kept("2"));
+        assert!(!kept("3"));
+        // A folder list is not a conversation body and is left alone.
+        store.save(
+            &ResourceKey::Conversations("inbox".into()),
+            &vec!["x".to_string()],
+            now,
+        );
+        store.prune_conversations(0);
+        assert!(!kept("1"));
+        assert!(
+            store
+                .load::<Vec<String>>(&ResourceKey::Conversations("inbox".into()))
+                .is_some()
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

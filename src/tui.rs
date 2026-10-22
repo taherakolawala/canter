@@ -131,6 +131,15 @@ impl Executor {
                 ResourceKey::WikiPage(c, u) => crate::modules::page(&client, c, u)
                     .await
                     .map(|(v, s)| (Payload::WikiPage(Box::new(v)), s)),
+                ResourceKey::Conversations(f) => match crate::inbox::Folder::of_id(f) {
+                    Some(folder) => crate::inbox::list(&client, folder)
+                        .await
+                        .map(|(v, s)| (Payload::Conversations(v), s)),
+                    None => Err(crate::canvas::CanvasError::Invalid("unknown Inbox folder")),
+                },
+                ResourceKey::Conversation(c) => crate::inbox::detail(&client, c)
+                    .await
+                    .map(|(v, s)| (Payload::Conversation(Box::new(v)), s)),
             };
             let at = Utc::now();
             if let Ok((payload, _)) = &result {
@@ -148,6 +157,12 @@ impl Executor {
                     Payload::Tabs(v) => store.save(&key, v, at),
                     Payload::Modules(v) => store.save(&key, v, at),
                     Payload::WikiPage(v) => store.save(&key, v.as_ref(), at),
+                    Payload::Conversations(v) => store.save(&key, v, at),
+                    Payload::Conversation(v) => {
+                        store.save(&key, v.as_ref(), at);
+                        // Saved conversation bodies stay within the agreed cap.
+                        store.prune_conversations(crate::inbox::MAX_MESSAGES);
+                    }
                 }
             }
             persist_rotated_cookies(&client, &session, &session_path);

@@ -286,6 +286,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 ];
                 frame.render_widget(Paragraph::new(text).alignment(Alignment::Center), body);
             }
+            ViewKind::Conversation { .. } => {
+                let kind = app.view().kind.clone();
+                let page = kind.page().expect("a page view");
+                draw_page(frame, main, app, &page, "Inbox", now)
+            }
             ViewKind::Announcement { course_name, .. }
             | ViewKind::Detail { course_name, .. }
             | ViewKind::WikiPage { course_name, .. } => {
@@ -438,6 +443,18 @@ fn draw_top(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
         } => {
             crumbs.push(course_name.clone());
             sync_text(app.tabs.get(course_id), app.spinner, now)
+        }
+        ViewKind::Conversation {
+            conversation_id,
+            subject,
+        } => {
+            crumbs.push("Inbox".into());
+            crumbs.push(subject.clone());
+            sync_text(
+                app.conversation_details.get(conversation_id),
+                app.spinner,
+                now,
+            )
         }
         ViewKind::Files {
             course_id,
@@ -671,12 +688,115 @@ fn draw_home(frame: &mut Frame, area: Rect, app: &mut App, now: DateTime<Utc>) {
         )),
         rule,
     );
-    // The calendar takes the left half; the right half is kept for other widgets.
-    let [calendar, _widgets] =
+    // The calendar takes the left half; the Inbox takes the right.
+    let [calendar, inbox] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Fill(1)]).areas(bottom);
     if calendar.height >= 6 {
         draw_month(frame, calendar, app, now);
     }
+    if inbox.height >= 3 && inbox.width >= 24 {
+        draw_inbox(frame, inbox, app, now);
+    }
+}
+
+/// The Inbox beside the calendar: the folders across the top, the chosen
+/// folder's conversations under them, newest activity first.
+fn draw_inbox(frame: &mut Frame, area: Rect, app: &mut App, now: DateTime<Utc>) {
+    let focused = app.focus() == Section::Inbox;
+    let current = app.inbox_folder;
+    let width = usize::from(area.width);
+    let mut spans = vec![Span::styled(" ", theme::faint())];
+    for (i, folder) in crate::inbox::Folder::ALL.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" │ ", theme::faint()));
+        }
+        spans.push(Span::styled(
+            folder.label(),
+            match (*folder == current, focused) {
+                (true, true) => theme::tab_active(),
+                (true, false) => theme::heading(),
+                _ => theme::faint(),
+            },
+        ));
+    }
+    let mut lines = vec![Line::from(spans)];
+    let (state, state_style) = sync_text(app.inbox_resource(), app.spinner, now);
+    let unread = app
+        .inbox_rows()
+        .iter()
+        .filter(|c| app.conversation_status(c) == "Unread")
+        .count();
+    lines.push(Line::from(vec![
+        Span::styled(
+            match (app.inbox_rows().len(), unread) {
+                (0, _) => String::new(),
+                (_, 0) => " all read ".to_string(),
+                (_, n) => format!(" {n} unread "),
+            },
+            if focused {
+                theme::tab_active()
+            } else {
+                theme::heading()
+            },
+        ),
+        Span::styled(state, state_style),
+        Span::styled(
+            if focused {
+                "   ←→ folder"
+            } else {
+                "   Tab to use the Inbox"
+            },
+            theme::faint(),
+        ),
+    ]));
+    let room = usize::from(area.height).saturating_sub(lines.len());
+    let rows = app.inbox_rows();
+    if rows.is_empty() {
+        let text = match app.inbox_resource().map(|r| &r.sync) {
+            Some(SyncState::Syncing { .. }) if app.inbox_resource().is_none() => {
+                "Loading…".to_string()
+            }
+            Some(SyncState::Failed(e)) => format!("   Could not load: {}", e.describe()),
+            _ => format!("   Nothing in {}.", current.label()),
+        };
+        lines.push(Line::styled(text, theme::muted()));
+        frame.render_widget(Paragraph::new(lines), area);
+        return;
+    }
+    // Keep the selection in view without scrolling the whole home screen.
+    let start = app.inbox_item.saturating_sub(room.saturating_sub(1));
+    for (i, c) in rows.iter().enumerate().skip(start).take(room) {
+        let status = app.conversation_status(c);
+        let unread = status == "Unread";
+        let when = c
+            .date()
+            .map(|d| short_date(d, now))
+            .unwrap_or_else(|| "Unknown date".into());
+        let mark = if c.starred == Some(true) { "*" } else { " " };
+        let who = truncate(&html::sanitize(&c.who()), 16);
+        let head = format!(" {mark}{} {who}  ", if unread { "•" } else { " " });
+        let subject = truncate(
+            &html::sanitize(c.subject()),
+            width.saturating_sub(head.width() + when.width() + 2),
+        );
+        let mut line = Line::from(vec![
+            Span::styled(
+                head,
+                if unread {
+                    theme::tab_active()
+                } else {
+                    theme::muted()
+                },
+            ),
+            Span::styled(subject, if unread { theme::bold() } else { theme::text() }),
+            Span::styled(format!("  {when}"), theme::faint()),
+        ]);
+        if focused && i == app.inbox_item {
+            line = line.style(theme::selected());
+        }
+        lines.push(line);
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// A course's colour: the one chosen in Canvas, else one from a fixed set.
@@ -1810,6 +1930,7 @@ fn page_body<'a>(app: &'a App, page: &Page) -> &'a [String] {
         Page::Assignment(..) => app.detail_render.as_ref(),
         Page::Announcement(..) => app.announcement_render.as_ref(),
         Page::Wiki(..) => app.wiki_render.as_ref(),
+        Page::Conversation(..) => app.conversation_render.as_ref(),
     };
     render.map(|r| r.lines.as_slice()).unwrap_or(&[])
 }
@@ -2060,6 +2181,38 @@ fn announcement_header(
     lines
 }
 
+fn conversation_header(app: &App, detail: &crate::inbox::Detail) -> Vec<Line<'static>> {
+    let c = &detail.base;
+    let count = c.message_count.unwrap_or(detail.messages.len() as u64);
+    let mut lines = vec![
+        Line::styled(html::sanitize(c.subject()), theme::tab_active()),
+        Line::styled(
+            html::sanitize(c.context_name.as_deref().unwrap_or("Inbox")),
+            theme::muted(),
+        ),
+        Line::raw(format!(
+            "{} · {} message{} · {}",
+            html::sanitize(&c.who()),
+            count,
+            if count == 1 { "" } else { "s" },
+            app.conversation_status(c)
+        )),
+    ];
+    if c.starred == Some(true) {
+        lines.push(Line::styled("Starred", theme::favorite()));
+    }
+    if (detail.messages.len() as u64) < count {
+        lines.push(Line::styled(
+            format!(
+                "Showing the newest {} of {count} messages. Press o to read the rest in the browser.",
+                detail.messages.len()
+            ),
+            theme::muted(),
+        ));
+    }
+    lines
+}
+
 /// An assignment or announcement: its details, its text, then its files &
 /// links and (for assignments) past submissions, all in one scrolling page.
 /// `Tab` moves the focus between those sections.
@@ -2185,6 +2338,32 @@ fn draw_page(
             }
             (header, "(This page is empty)")
         }
+        Page::Conversation(id) => {
+            if placeholder(
+                frame,
+                area,
+                app.conversation_details.get(id),
+                "conversation",
+            ) {
+                return;
+            }
+            let res = &app.conversation_details[id];
+            let stale = !matches!(&app.conversation_render, Some(r)
+                if r.key.0 == *id && r.version == res.version && r.width == text_width);
+            if stale {
+                // One document for every message, so the `[n]` marks in the
+                // text and the files & links list use the same numbering.
+                let lines = html::render(&app.conversation_document(id), width, &app.origin);
+                app.conversation_render = Some(DetailRender {
+                    key: (id.clone(), String::new()),
+                    version: res.version,
+                    width: text_width,
+                    lines,
+                });
+            }
+            let detail = app.conversation_details[id].data.as_ref().expect("checked");
+            (conversation_header(app, detail), "(No messages)")
+        }
     };
     let focus = app.focus();
     let (selected_link, selected_attempt) = (app.view().link, app.view().attempt);
@@ -2237,7 +2416,7 @@ fn draw_page(
         let start = match focus {
             Section::Links => anchors.links,
             Section::Submissions => anchors.submissions,
-            Section::Text | Section::Calendar | Section::Day => None,
+            Section::Text | Section::Calendar | Section::Day | Section::Inbox => None,
         };
         if let Some(start) = start {
             view.scroll = start;
@@ -2261,7 +2440,7 @@ fn draw_page(
                 view.scroll = row.saturating_sub(1);
             }
         }
-        Section::Text | Section::Calendar | Section::Day => {}
+        Section::Text | Section::Calendar | Section::Day | Section::Inbox => {}
     }
     view.scroll = view.scroll.min(max_scroll);
     let scroll = view.scroll;
@@ -2638,7 +2817,8 @@ mod tests {
             vec![
                 ResourceKey::Courses,
                 ResourceKey::Planner(crate::calendar::month_key(app.calendar_day)),
-                ResourceKey::Colors
+                ResourceKey::Colors,
+                ResourceKey::Conversations("inbox".into()),
             ]
         );
         assert!(app.menu.is_none());
@@ -2764,6 +2944,162 @@ mod tests {
         assert!(rendered.contains("Canvas shows none of the sections"));
     }
 
+    /// The home screen with its courses, calendar and Inbox all delivered.
+    fn home_app(conversations: Vec<crate::inbox::Summary>) -> App {
+        let mut app = App::new("https://ufl.instructure.com", None);
+        let effects = app.start();
+        for e in effects {
+            let crate::app::Effect::Fetch { key, request } = e else {
+                continue;
+            };
+            let payload = match &key {
+                ResourceKey::Courses => Payload::Courses(vec![Course {
+                    id: "10".into(),
+                    name: Some("GPU Computing".into()),
+                    course_code: Some("EEL5934".into()),
+                    ..Default::default()
+                }]),
+                ResourceKey::Planner(_) => Payload::Planner(vec![]),
+                ResourceKey::Colors => Payload::Colors(Default::default()),
+                ResourceKey::Conversations(_) => Payload::Conversations(conversations.clone()),
+                other => panic!("unexpected read {other:?}"),
+            };
+            app.update(Msg::Fetched {
+                key,
+                request,
+                result: Ok((payload, FetchStats::default())),
+                at: Utc::now(),
+            });
+        }
+        app
+    }
+
+    #[test]
+    fn home_screen_shows_the_inbox_beside_the_calendar_with_its_folders() {
+        let conversation = |id: &str, subject: &str, state: &str, starred| crate::inbox::Summary {
+            id: id.into(),
+            subject: Some(subject.into()),
+            workflow_state: Some(state.into()),
+            last_message_at: Some(Utc::now()),
+            starred: Some(starred),
+            participants: vec![crate::inbox::Participant {
+                id: "7".into(),
+                name: Some("Dr Ada".into()),
+            }],
+            ..Default::default()
+        };
+        let mut app = home_app(vec![
+            conversation("5", "Lab 3 feedback", "unread", false),
+            conversation("6", "Office hours moved", "read", true),
+        ]);
+        let home = screen(&mut app, 112, 30);
+        println!("{home}\n");
+        for part in [
+            "GPU Computing",
+            "Inbox",
+            "Unread",
+            "Starred",
+            "Sent",
+            "Archived",
+            "Lab 3 feedback",
+            "Office hours moved",
+            "Dr Ada",
+            "Tab to use the Inbox",
+        ] {
+            assert!(home.contains(part), "{part} missing:\n{home}");
+        }
+        // Unread is marked, starred is marked, and Tab gives the Inbox focus.
+        assert!(home.contains('•') && home.contains('*'), "{home}");
+        app.update(Msg::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        app.update(Msg::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+        let focused = screen(&mut app, 112, 30);
+        println!("{focused}\n");
+        assert!(focused.contains("←→ folder"), "{focused}");
+        assert!(focused.contains("Enter open"), "{focused}");
+        // An empty folder says so rather than looking broken.
+        let mut empty = home_app(vec![]);
+        let rendered = screen(&mut empty, 112, 30);
+        assert!(rendered.contains("Nothing in Inbox."), "{rendered}");
+        for (w, h) in [(60, 20), (40, 10), (20, 5), (1, 1)] {
+            let _ = screen(&mut app, w, h);
+        }
+    }
+
+    #[test]
+    fn a_conversation_reads_as_a_page_with_each_message_and_its_files() {
+        let mut app = home_app(vec![crate::inbox::Summary {
+            id: "5".into(),
+            subject: Some("Lab 3 feedback".into()),
+            workflow_state: Some("unread".into()),
+            last_message_at: Some(Utc::now()),
+            message_count: Some(2),
+            context_name: Some("GPU Computing".into()),
+            participants: vec![crate::inbox::Participant {
+                id: "7".into(),
+                name: Some("Dr Ada".into()),
+            }],
+            ..Default::default()
+        }]);
+        let press =
+            |app: &mut App, code| app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        let effects = press(&mut app, KeyCode::Enter);
+        let message = |id: &str, body: &str, when: &str| crate::inbox::Message {
+            id: id.into(),
+            created_at: Some(
+                DateTime::parse_from_rfc3339(when)
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ),
+            body: Some(body.into()),
+            author_id: Some("7".into()),
+            ..Default::default()
+        };
+        let mut newest = message("9", "Your notes are attached.", "2026-10-20T15:04:00Z");
+        newest.attachments = vec![CanvasFile {
+            id: "12".into(),
+            display_name: Some("notes.pdf".into()),
+            size: Some(2048),
+            ..Default::default()
+        }];
+        let detail = crate::inbox::Detail {
+            base: app.inbox_rows()[0].clone(),
+            messages: vec![
+                newest,
+                message(
+                    "8",
+                    "I have a question about Lab 3.",
+                    "2026-10-19T09:00:00Z",
+                ),
+            ],
+        };
+        deliver(&mut app, effects, Payload::Conversation(Box::new(detail)));
+        let page = screen(&mut app, 100, 26);
+        println!("{page}\n");
+        for part in [
+            "Lab 3 feedback",
+            "GPU Computing",
+            "Dr Ada",
+            "2 messages",
+            "Read",
+            "Your notes are attached.",
+            "I have a question about Lab 3.",
+            "Files & links (1)",
+            "notes.pdf",
+        ] {
+            assert!(page.contains(part), "{part} missing:\n{page}");
+        }
+        // Its details are not read until it is chosen, so no size is claimed.
+        assert!(!page.contains("2.0 KB"), "{page}");
+        // Both messages are headed by their own date.
+        assert!(page.contains("October 20, 2026"), "{page}");
+        assert!(page.contains("October 19, 2026"), "{page}");
+        for (w, h) in [(60, 20), (40, 10), (20, 5), (1, 1)] {
+            let _ = screen(&mut app, w, h);
+        }
+    }
+
     #[test]
     fn home_screen_has_the_courses_then_a_month_calendar() {
         use crate::calendar::{Item, Kind, Progress};
@@ -2784,9 +3120,10 @@ mod tests {
             vec![
                 ResourceKey::Courses,
                 ResourceKey::Planner(month.clone()),
-                ResourceKey::Colors
+                ResourceKey::Colors,
+                ResourceKey::Conversations("inbox".into()),
             ],
-            "courses, the month shown and course colours are read together"
+            "courses, the month shown, course colours and the Inbox are read together"
         );
         let send_fetch = |app: &mut App, i: usize, payload: Payload| {
             deliver(

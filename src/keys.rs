@@ -114,6 +114,10 @@ pub enum Scope {
     Calendar,
     /// The selected day's entries have focus.
     Day,
+    /// The Inbox on the home screen has focus.
+    Inbox,
+    /// An open Inbox conversation.
+    Conversation,
     Assignment,
     SignedOut,
     /// Typing in a list's search box.
@@ -280,6 +284,22 @@ pub static BINDINGS: &[Binding] = &[
     )
     .title("Back to the calendar")
     .hint(7),
+    b(Act::Up, &[UP, ch('k')], &[Inbox], "select").title("Previous conversation"),
+    b(Act::Down, &[DOWN, ch('j')], &[Inbox], "select")
+        .title("Next conversation")
+        .hint(1)
+        .shown("↑↓"),
+    b(Act::Left, &[LEFT, ch('h')], &[Inbox], "folder").title("Previous folder"),
+    b(Act::Right, &[RIGHT, ch('l')], &[Inbox], "folder")
+        .title("Next folder (Inbox, Unread, Starred, Sent, Archived)")
+        .hint(3)
+        .shown("←→"),
+    b(Act::Open, &[ENTER], &[Inbox], "open")
+        .title("Open the conversation")
+        .hint(2),
+    b(Act::Back, &[ESC, BACKSPACE], &[Inbox], "courses")
+        .title("Back to the course list")
+        .hint(7),
     b(Act::Up, &[UP, ch('k')], &[List, Page, Help], "move").title("Move up"),
     b(Act::Down, &[DOWN, ch('j')], &[List], "move")
         .title("Move down")
@@ -330,11 +350,11 @@ pub static BINDINGS: &[Binding] = &[
         .title("Next tab")
         .hint(6),
     b(Act::PrevSection, &[BACKTAB], &[CourseTabs], "previous tab").title("Previous tab"),
-    b(Act::NextSection, &[TAB], &[Courses], "calendar")
-        .title("Switch between the courses and the calendar")
+    b(Act::NextSection, &[TAB], &[Courses], "section")
+        .title("Move between the courses, the calendar and the Inbox")
         .hint(6),
-    b(Act::PrevSection, &[BACKTAB], &[Courses], "calendar")
-        .title("Switch between the courses and the calendar"),
+    b(Act::PrevSection, &[BACKTAB], &[Courses], "section")
+        .title("Move back between the courses, the calendar and the Inbox"),
     b(Act::NextSection, &[TAB], &[Sections], "next section")
         .title("Next section (text, files & links, submissions)")
         .hint(5),
@@ -633,6 +653,10 @@ mod tests {
             vec![Screen, List, Courses],
             vec![Screen, Courses, Calendar],
             vec![Screen, Courses, Day],
+            vec![Screen, Courses, Inbox],
+            vec![Screen, Page, Sections, Conversation],
+            vec![Screen, Page, Sections, Conversation, HasLinks],
+            vec![Screen, Page, Sections, Conversation, HasLinks, Links],
             vec![Screen, List, CourseTabs],
             vec![Screen, List, CourseTabs, Files],
             vec![Screen, Page, Sections],
