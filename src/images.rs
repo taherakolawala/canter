@@ -689,7 +689,16 @@ mod tests {
             )
             .expect("install");
         let lines = vec!["[image: chart][1]".to_string(), "after".to_string()];
-        let body = place(lines, &[link(true, "33")], Some(&library), 60);
+        let body = place(lines.clone(), &[link(true, "33")], Some(&library), 60);
+        if !enabled() {
+            // `NO_COLOR` or `TUICANVAS_IMAGES=off` in whoever's environment is
+            // running this. The switch itself is checked above; what this test
+            // can still require is that the text is left exactly as it was.
+            assert_eq!(body.lines, lines);
+            assert!(body.boxes.is_empty());
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
         assert!(
             body.lines.len() > 2,
             "rows should be reserved for the picture: {:?}",
