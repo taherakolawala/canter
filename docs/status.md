@@ -71,7 +71,11 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
 - **Images in the terminal** (prototype). Images embedded in assignment, page
   and announcement text are drawn where the text has them, from the copy the
   library already downloaded, as half blocks in a box that keeps the aspect
-  ratio and reflows with the width. `TUICANVAS_IMAGES=off` turns them off and
+  ratio and reflows with the width. An assignment's images are downloaded when
+  it is opened, so they appear on their own; a page's and an announcement's are
+  not, so until you download them (`D`, or `d` on one) the text keeps its `[n]`
+  marks. A finished download drops the wrapped text so the picture appears at
+  once, rather than at the next refresh or resize. `TUICANVAS_IMAGES=off` turns them off and
   leaves the `[n]` marks unchanged. Sixel and the kitty protocol are not drawn.
 
 ## Known issues and limits

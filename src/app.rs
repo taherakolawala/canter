@@ -2539,6 +2539,16 @@ impl App {
         })
     }
 
+    /// Drop the wrapped text of every reader screen, so the next draw builds
+    /// it again. Only a finished download needs this, and re-wrapping one open
+    /// page is cheap next to the read that fetched it.
+    fn forget_renders(&mut self) {
+        self.detail_render = None;
+        self.announcement_render = None;
+        self.wiki_render = None;
+        self.conversation_render = None;
+    }
+
     fn on_transfer(&mut self, file_id: String, event: TransferEvent) -> Vec<Effect> {
         let name = |app: &App, fallback: Option<&PathBuf>| {
             app.file_meta(&file_id)
@@ -2561,6 +2571,12 @@ impl App {
             TransferEvent::Done(path) => {
                 self.transfers.remove(&file_id);
                 let placements = self.pending.remove(&file_id).unwrap_or_default();
+                // An image box is placed while the text is wrapped, from the
+                // library's copy. That copy has just arrived, and the render
+                // is kept until the resource, the width or the version
+                // changes, none of which a download touches: without this the
+                // picture would not appear until a refresh or a resize.
+                self.forget_renders();
                 if let Some(lib) = self.library.clone() {
                     if placements.iter().any(|p| !p.automatic) {
                         lib.keep(&file_id);
@@ -6630,6 +6646,33 @@ mod tests {
             [Effect::Download { .. }]
         ));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_finished_download_lets_the_picture_be_placed() {
+        // The image box is built while the text is wrapped, so the wrapped
+        // text has to be dropped when the file it needs arrives. Nothing else
+        // about the page changes, and before this the picture only showed
+        // after a refresh or a resize.
+        let mut app = files_app(None);
+        let render = || DetailRender {
+            key: ("10".into(), "1".into()),
+            version: 1,
+            width: 80,
+            body: crate::images::Body::plain(vec!["text [1]".into()]),
+        };
+        app.detail_render = Some(render());
+        app.announcement_render = Some(render());
+        app.wiki_render = Some(render());
+        app.conversation_render = Some(render());
+        app.update(Msg::Transfer {
+            file_id: "99".into(),
+            event: TransferEvent::Done(PathBuf::from("image.png")),
+        });
+        assert!(app.detail_render.is_none());
+        assert!(app.announcement_render.is_none());
+        assert!(app.wiki_render.is_none());
+        assert!(app.conversation_render.is_none());
     }
 
     #[test]
