@@ -3,6 +3,13 @@
 Agreed on 2026-10-22. Order is roughly the order of work. Decisions already
 made are recorded here so they are not re-litigated.
 
+**State on 2026-10-22, evening.** Items 1, 2, 3 and 5 are built, merged and
+offline-tested, and items 1 and 2 are verified against the account. Item 4
+(sign-in in Rust) is built and merged but is only verified as far as UF's
+login form: the password, Duo, the cookie capture and each failure still need
+one live run. What remains unverified live is listed under "Live checks still
+owed" at the end.
+
 ## Decided
 
 - **Sign-in.** Rust drives Edge itself (no Python, no Playwright) for UF, with a
@@ -64,3 +71,20 @@ them off.
 Discussions, syllabus, People, module progress (tabled), porting to macOS and
 Linux (after everything else), saved-copy reuse and prefetching (build-plan
 milestones 4 and 5), and the non-UF sign-in live check (milestone 9).
+
+## Live checks still owed
+
+- **Sign-in in Rust.** `--logout` then `--login`, then `--smoke`; the same with
+  `--login --window`; then `TUICANVAS_SIGNIN=python` to confirm the old helper
+  still runs. Nothing past UF's form has been exercised.
+- **A text-entry submission** to an assignment of your choosing (18 here take
+  the type).
+- **A website-URL submission.** No assignment in the account uses `online_url`,
+  so it cannot be checked until one appears.
+- **Sending from the Inbox** (a reply and a new message to teachers). Reading
+  every folder, opening a conversation and leaving Canvas's read state alone is
+  checked (`cargo test --release live_inbox -- --ignored`).
+- **A feedback file.** No instructor comment in the account has an attachment,
+  so `Assignment Files/<assignment>/Feedback` has not taken a real file.
+- **Images on screen.** Only you can judge the half-block drawing; the tests
+  check the cells, not how it looks.
