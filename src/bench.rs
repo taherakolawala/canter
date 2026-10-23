@@ -130,6 +130,12 @@ fn current_has_data(app: &App) -> bool {
             .course_files
             .get(course_id)
             .is_some_and(|r| r.data.is_some()),
+        ViewKind::Conversation {
+            conversation_id, ..
+        } => app
+            .conversation_details
+            .get(conversation_id)
+            .is_some_and(|r| r.data.is_some()),
     }
 }
 
@@ -220,7 +226,8 @@ fn find_row(app: &App, needle: &str) -> Option<usize> {
             ViewKind::Detail { .. }
             | ViewKind::Announcement { .. }
             | ViewKind::WikiPage { .. }
-            | ViewKind::CourseHome { .. } => false,
+            | ViewKind::CourseHome { .. }
+            | ViewKind::Conversation { .. } => false,
             ViewKind::Modules { course_id, .. } => {
                 matches!(app.module_rows(course_id).get(i), Some(crate::app::ModuleRow::Item(_, it))
                     if it.title().to_lowercase().contains(&needle))

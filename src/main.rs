@@ -15,6 +15,7 @@ mod download;
 mod grades;
 mod html;
 mod images;
+mod inbox;
 mod keys;
 mod library;
 mod model;
