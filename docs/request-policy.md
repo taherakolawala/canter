@@ -44,7 +44,7 @@ Sending is never a consequence of reading. Each request below is made only from 
 | Download | Request | Trigger | Rules |
 | --- | --- | --- | --- |
 | A file the user chose | The file's `url` from its details (`/files/:id/download?download_frd=1&verifier=…` on the Canvas origin), then Canvas's redirects: `*.canvas-user-content.com` → `inst-fs-*.inscloudgate.net` → `cdn.inst-fs-*.inscloudgate.net` | `Enter` (download if needed, then open), `d`, `D` (all files of a folder and its subfolders, or of an assignment) | Not downloaded again while the saved copy matches Canvas's version (modified time and size). Locked files are not requested. |
-| Images in an assignment | Same | When the assignment's detail is read (which the user started by opening it), after the image's details arrive | Stored in the assignment's folder; removed after 30 days unused unless the user opened or downloaded it |
+| Images in an assignment | Same | When the assignment's detail is read (which the user started by opening it), after the image's details arrive | Stored in the assignment's folder; removed after a week unused unless the user opened or downloaded it |
 
 - **Credentials.** Canvas cookies go only to the Canvas origin, on the first hop. Every later hop must be HTTPS on port 443 to one of Canvas's two storage domains and gets no cookies (its address is signed). Anything else stops the download.
 - **Limits.** At most 2 downloads at once, separate from the 4 read slots; at most 6 redirects; at most 2 GB per file. The body streams to `.tuicanvas\partial` and is installed only when complete and the length matches.
@@ -77,7 +77,7 @@ Shared rules:
   - Canvas cookies only: identity-provider cookies are never sent to Canvas.
   - The CSRF token is sent only on POSTs: the GraphQL read and the submission writes above.
   - Paths are restricted to `/api/v1/` and `/api/graphql`, and pagination links must stay on the same origin.
-- **Saved copies.** Stored for the course list, assignment lists, assignment details, course file listings, file details, Inbox folder lists and conversations, scoped by Canvas origin and account id. Logout deletes them. Downloaded files are not saved copies: they stay in the file library until you delete them (automatic images: 30 days unused).
+- **Saved copies.** Stored for the course list, assignment lists, assignment details, course file listings, file details, Inbox folder lists and conversations, scoped by Canvas origin and account id. Logout deletes them. Downloaded files are not saved copies: they stay in the file library until you delete them (automatic images: a week unused).
 
 ## Web-page requests omitted from the reader
 

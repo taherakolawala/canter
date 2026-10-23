@@ -127,7 +127,7 @@ TUICanvas\
 
 - **Class Files.** The reader lists the course's whole folder tree from Canvas in one read, so browsing it needs no further requests. Downloading is always the user's choice, per file or per folder. Courses that hide Files from students say so; their assignment attachments still work.
 - **Assignment Files.** Files linked from an assignment's description are listed there and downloaded when the user chooses.
-- **Images** in an assignment are downloaded automatically when it is opened, so they open instantly later. They are deleted after 30 days without use.
+- **Images** in an assignment are downloaded automatically when it is opened, so they open instantly later. They are deleted after a week without use.
 - **One copy.** A Canvas file referenced from both places is stored once, using NTFS hard links: the same data appears in both folders. If linking is impossible (for example across drives), a second copy is made and both are tracked.
 - **Resync.** Any downloaded file or folder can be resynced manually. A small index (Canvas file id → Canvas version, size, local paths, last use) lets the reader mark files that changed on Canvas since download and apply the 30-day image rule.
 - **Opening** a file uses its default Windows app for now; the user is still considering in-terminal previews. Programs and scripts are never opened (they are shown in File Explorer), and downloads carry the browser's "downloaded from the internet" mark so Office and SmartScreen treat them as such.

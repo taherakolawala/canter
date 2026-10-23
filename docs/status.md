@@ -43,7 +43,7 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
   - **Past submissions** are part of the assignment page. When Canvas shows something was submitted, the attempt history is read with the page (one more read, fresh on each visit). `↑↓` in the Submissions section choose an attempt, shown in full: date, type, status, grade when visible, attached file names and submitted text or URL.
   - **Instructor feedback** is the next section, for the attempt selected. The same submission read brings the comments and the rubric scores, so it stays one request: each comment shows its author, date and text, and `↑↓` move between the comments and then the scored rubric criteria (criterion, points of the possible points, the instructor's note) under the rubric's title and total. Canvas keeps one rubric assessment per submission, so it appears with the latest attempt. Comment attachments go to `Assignment Files\<assignment>\Feedback` with `Enter`, `d` or `D`, through the same one stored copy and hard links as every other file. What Canvas carries no text for is said plainly rather than guessed at: an audio or video comment, and feedback drawn on the submitted file in Canvas's document viewer, are marked as browser-only, and `o` opens the submission page where Canvas shows them.
   - **Submitting.** `s` (or `Space` then `s`) submits files, `t` typed text, and `u` a website address, where Canvas accepts that type. All three end on the same review screen, which shows the exact content that will be sent — the files with their full paths, or the text and address character for character — and only `y` sends it. Text can be typed in TUICanvas or read from a UTF-8 file named with `Ctrl+O` (the way to submit paragraphs). Each one is verified by re-reading the submission afterwards.
-  - Files go to `C:\Users\<you>\TUICanvas` (`e` on a course opens its folder; `Space` then `f` opens the TUICanvas folder). Images in an assignment download when you open it and are removed after 30 days unused.
+  - Files go to `C:\Users\<you>\TUICanvas` (`e` on a course opens its folder; `Space` then `f` opens the TUICanvas folder). Images in an assignment download when you open it and are removed after a week unused.
   - Each screen shows its saved copy at once, with **Syncing** at the top, and is labelled **Outdated** if the fresh read fails.
   - Colours mark deadline urgency and status.
 - **Reads**, measured live on one account, 17 courses, 157 assignments:
@@ -71,7 +71,7 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
 - **Images in the terminal** (prototype). Images embedded in assignment, page
   and announcement text are drawn where the text has them, from the copy the
   library already downloaded, as half blocks in a box that keeps the aspect
-  ratio and reflows with the width. An assignment's images are downloaded when
+  ratio, sits in the middle of the text column and reflows with the width. An assignment's images are downloaded when
   it is opened, so they appear on their own; a page's and an announcement's are
   not, so until you download them (`D`, or `d` on one) the text keeps its `[n]`
   marks. A finished download drops the wrapped text so the picture appears at

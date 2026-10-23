@@ -6,7 +6,7 @@
 //! linking fails, a second copy is made and both are tracked. A small index
 //! records each file's Canvas version, local paths and last use, so the reader
 //! can mark files that changed on Canvas, resync them in place (which updates
-//! every linked name), and remove auto-downloaded images after 30 days unused.
+//! every linked name), and remove auto-downloaded images after a week unused.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Auto-downloaded images are removed after this long without use.
-pub const IMAGE_RETENTION_DAYS: i64 = 30;
+pub const IMAGE_RETENTION_DAYS: i64 = 7;
 const MAX_NAME: usize = 120;
 
 /// What Canvas says about a file, enough to place it and detect changes.
@@ -539,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn unused_automatic_images_are_removed_after_30_days() {
+    fn unused_automatic_images_are_removed_after_a_week() {
         let root = temp_root("evict");
         let lib = Library::open(&root, "ufl.instructure.com");
         let image = lib.assignment_dir("GPU", "Lab-2").join("diagram.png");
@@ -552,8 +552,13 @@ mod tests {
         lib.install("11", &tmp, version("t", 3), &kept, false)
             .unwrap();
         let now = Utc::now();
-        lib.set_last_used("10", now - Duration::days(31));
+        // Just inside the week: still there.
+        lib.set_last_used("10", now - Duration::days(6));
         lib.set_last_used("11", now - Duration::days(400));
+        assert_eq!(lib.evict_unused(now), 0);
+        assert!(image.exists(), "six days unused is still within the week");
+        // Just past it.
+        lib.set_last_used("10", now - Duration::days(8));
         assert_eq!(lib.evict_unused(now), 1);
         assert!(!image.exists());
         assert!(kept.exists(), "files the user chose are never auto-removed");

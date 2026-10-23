@@ -323,7 +323,7 @@ impl Executor {
         });
     }
 
-    /// Remove auto-downloaded images unused for 30 days, off the UI thread.
+    /// Remove auto-downloaded images unused for a week, off the UI thread.
     pub(crate) fn evict_unused_files(&self) {
         let library = self.library.clone();
         self.rt

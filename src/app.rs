@@ -258,7 +258,7 @@ pub enum Local {
 struct Intent {
     dir: PathBuf,
     open: bool,
-    /// Downloaded without being asked (assignment images): removed after 30 days unused.
+    /// Downloaded without being asked (assignment images): removed after a week unused.
     automatic: bool,
     /// Part of a batch or automatic: no notice when it finishes.
     quiet: bool,

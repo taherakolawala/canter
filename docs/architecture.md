@@ -255,7 +255,7 @@ C:\Users\<you>\TUICanvas\
 - **Where you find files.** Each course has tabs for **Assignments**, **Files** and **Announcements** (`Tab` switches). Files shows the course's folders as Canvas has them; one listing read covers the whole course, so moving between folders and searching (`/`, across all folders) needs no further reads. Each assignment has a **Files & links** list under its description, numbered like the links in the text.
 - **When files download.**
   - When you open one (`Enter`, then it opens in its default app), or ask for it (`d`, or `D` for everything in a folder or assignment).
-  - Images in an assignment's description download automatically when the assignment is read, so they open instantly later. They are removed after 30 days without use, unless you opened or downloaded them yourself.
+  - Images in an assignment's description download automatically when the assignment is read, so they open instantly later. They are removed after a week without use, unless you opened or downloaded them yourself.
 - **One copy, several places.** A file that is both in Class Files and attached to an assignment is stored once and appears in both folders through an NTFS hard link (a second name for the same data). If linking is impossible, it is copied, and both copies are tracked.
 - **Keeping files current.** The index records each file's Canvas version (modified time and size). When Canvas has a newer version, the file shows **newer on Canvas**; downloading it again overwrites the stored copy in place, which updates every place it appears.
 - **Names.** Windows-safe (reserved characters and names replaced, length capped, extension kept). Two different files that want the same name in one folder get `name (file id).ext`; a file the reader did not put there is never replaced.
@@ -393,7 +393,7 @@ the text and once where it draws a body line.
 - **The file is already there.** `html.rs` turns each `<img>` into an
   `[image: alt][n]` mark, where `n` is the image's place in the page's files &
   links list, and opening a page already downloads its images into the library
-  (removed after 30 days unused, see **Files and the local library**). This
+  (removed after a week unused, see **Files and the local library**). This
   module only reads the local copy. It never requests anything.
 - **Half blocks.** A cell is drawn as the upper half block `▀` with the top
   pixel as its foreground colour and the bottom pixel as its background, so one

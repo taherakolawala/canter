@@ -363,13 +363,31 @@ pub fn place(
             let Some(pixels) = decode(&path, max_cols, MAX_ROWS) else {
                 continue;
             };
+            let left = centre_indent(width, pixels.width);
             for row in half_block_rows(&pixels) {
-                boxes.insert(out.len(), row);
+                boxes.insert(out.len(), indent(row, left));
                 out.push(String::new());
             }
         }
     }
     Body { lines: out, boxes }
+}
+
+/// How far in to start a box of `cells` columns so it sits in the middle of a
+/// page `width` columns wide. A box as wide as the page starts at the edge.
+pub fn centre_indent(width: u16, cells: u32) -> usize {
+    (usize::from(width).saturating_sub(cells as usize)) / 2
+}
+
+/// The same row, moved in by `cells` blank columns.
+fn indent(line: Line<'static>, cells: usize) -> Line<'static> {
+    if cells == 0 {
+        return line;
+    }
+    let mut spans = Vec::with_capacity(line.spans.len() + 1);
+    spans.push(Span::raw(" ".repeat(cells)));
+    spans.extend(line.spans);
+    Line::from(spans)
 }
 
 /// The library's copy of a file, if one is on disk.
@@ -680,6 +698,32 @@ mod tests {
         assert!(!body.boxes.is_empty(), "a box should be placed");
         assert_eq!(body.lines.first().map(String::as_str), Some("[image: chart][1]"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_box_sits_in_the_middle_of_the_page() {
+        // A narrow picture on a wide page: half the spare room on each side.
+        assert_eq!(centre_indent(80, 20), 30);
+        // Odd spare room leans left by one, so nothing overflows the right.
+        assert_eq!(centre_indent(81, 20), 30);
+        // As wide as the page, or wider: start at the edge.
+        assert_eq!(centre_indent(20, 20), 0);
+        assert_eq!(centre_indent(10, 20), 0);
+    }
+
+    #[test]
+    fn a_centred_row_keeps_every_pixel_after_the_blanks() {
+        let pixels = Pixels {
+            width: 2,
+            height: 2,
+            rgb: vec![[1, 1, 1], [2, 2, 2], [3, 3, 3], [4, 4, 4]],
+        };
+        let row = half_block_rows(&pixels).remove(0);
+        let cells = row.spans.len();
+        let moved = indent(row, 3);
+        assert_eq!(moved.spans[0].content.as_ref(), "   ");
+        assert_eq!(moved.spans.len(), cells + 1, "pixels are kept, not replaced");
+        assert_eq!(moved.width(), cells + 3);
     }
 
     #[test]
