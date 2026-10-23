@@ -650,6 +650,39 @@ mod tests {
     }
 
     #[test]
+    fn a_library_copy_is_drawn_where_the_mark_is() {
+        // The whole path, end to end: a mark, a link that is an image, and a
+        // file on disk under that id. Everything below this was tested
+        // separately, and a page still showed nothing.
+        let root = std::env::temp_dir().join(format!("tuicanvas-place-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let library = crate::library::Library::open(&root, "ufl.instructure.com");
+        let downloaded = temp_file("place", &two_tone_png(8, 8));
+        library
+            .install(
+                "33",
+                &downloaded,
+                crate::library::FileVersion {
+                    updated_at: None,
+                    size: Some(8),
+                },
+                &root.join("chart.png"),
+                true,
+            )
+            .expect("install");
+        let lines = vec!["[image: chart][1]".to_string(), "after".to_string()];
+        let body = place(lines, &[link(true, "33")], Some(&library), 60);
+        assert!(
+            body.lines.len() > 2,
+            "rows should be reserved for the picture: {:?}",
+            body.lines
+        );
+        assert!(!body.boxes.is_empty(), "a box should be placed");
+        assert_eq!(body.lines.first().map(String::as_str), Some("[image: chart][1]"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn without_a_library_the_text_is_left_alone() {
         let lines = vec!["[image: chart][1]".to_string(), "after".to_string()];
         let body = place(lines.clone(), &[link(true, "33")], None, 60);
