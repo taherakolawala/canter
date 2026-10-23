@@ -4456,38 +4456,37 @@ mod tests {
         println!("{rendered}\n");
         assert!(rendered.contains("does not show the course total"));
         assert!(rendered.contains("no graded work"));
-
-        #[test]
-        fn the_page_list_renders_titles_dates_and_the_course_home() {
-            let mut app = App::new("https://ufl.instructure.com", None);
-            app.stack = vec![crate::app::View::new(ViewKind::Pages {
-                course_id: "1".into(),
-                course_name: "Course".into(),
-            })];
-            let r = app.page_lists.entry("1".to_string()).or_default();
-            r.data = Some(vec![
-                crate::modules::PageSummary {
-                    url: Some("welcome".into()),
-                    title: Some("Welcome".into()),
-                    updated_at: Some(Utc::now() - chrono::Duration::days(2)),
-                    front_page: Some(true),
-                    ..Default::default()
-                },
-                crate::modules::PageSummary {
-                    url: Some("old-lab".into()),
-                    title: Some("Old lab".into()),
-                    updated_at: Some(Utc::now() - chrono::Duration::days(40)),
-                    locked_for_user: Some(true),
-                    ..Default::default()
-                },
-            ]);
-            r.version += 1;
-            let rendered = screen(&mut app, 100, 12);
-            println!("{rendered}\n");
-            assert!(rendered.contains("Pages") && rendered.contains("Last changed"));
-            assert!(rendered.contains("Welcome") && rendered.contains("(course home)"));
-            assert!(rendered.contains("Old lab") && rendered.contains("Locked"));
-        }
+    }
+    #[test]
+    fn the_page_list_renders_titles_dates_and_the_course_home() {
+        let mut app = App::new("https://ufl.instructure.com", None);
+        app.stack = vec![crate::app::View::new(ViewKind::Pages {
+            course_id: "1".into(),
+            course_name: "Course".into(),
+        })];
+        let r = app.page_lists.entry("1".to_string()).or_default();
+        r.data = Some(vec![
+            crate::modules::PageSummary {
+                url: Some("welcome".into()),
+                title: Some("Welcome".into()),
+                updated_at: Some(Utc::now() - chrono::Duration::days(2)),
+                front_page: Some(true),
+                ..Default::default()
+            },
+            crate::modules::PageSummary {
+                url: Some("old-lab".into()),
+                title: Some("Old lab".into()),
+                updated_at: Some(Utc::now() - chrono::Duration::days(40)),
+                locked_for_user: Some(true),
+                ..Default::default()
+            },
+        ]);
+        r.version += 1;
+        let rendered = screen(&mut app, 100, 12);
+        println!("{rendered}\n");
+        assert!(rendered.contains("Pages") && rendered.contains("Last changed"));
+        assert!(rendered.contains("Welcome") && rendered.contains("(course home)"));
+        assert!(rendered.contains("Old lab") && rendered.contains("Locked"));
     }
 }
 

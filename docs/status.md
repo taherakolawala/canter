@@ -60,7 +60,7 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
   - All three build-plan performance goals are met.
 - **Downloads**, measured live: a 908 KB PDF in 1.1 s through the full redirect chain, saved, linked and marked as downloaded from the internet.
 - **Announcements live check (2026-10-21).** Rust read all 1,380 announcements across 17 courses and opened one detail in each of the 13 nonempty courses. Median list refresh: 237 ms. The 674-item course took 5.43 s across seven pages, 205 KB; cached lists remain visible while refreshing. Counts match the earlier probe; no account content is included in the report.
-- **Checks.** 233 Rust tests (Windows) and 32 Python tests pass. `tuicanvas --smoke` re-verifies live reads, file access and one download; `tuicanvas --dump DIR` renders each screen headlessly, including the Grades tab and the instructor's feedback, and downloads one file into a scratch library.
+- **Checks.** 234 Rust tests (Windows) and 32 Python tests pass. `tuicanvas --smoke` re-verifies live reads, file access and one download; `tuicanvas --dump DIR` renders each screen headlessly, including the Grades tab and the instructor's feedback, and downloads one file into a scratch library.
 
 - **Images in the terminal** (prototype). Images embedded in assignment, page
   and announcement text are drawn where the text has them, from the copy the
