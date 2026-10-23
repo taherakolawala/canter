@@ -52,6 +52,12 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
   - Assignment detail: REST, about 210–250 ms and 4 KB.
   - Grades: three REST reads, 687–768 ms together on one course (`--dump`, 2026-10-22). The assignment groups with submissions are the slowest: median 461 ms across the 17 courses, 2.6 s worst case. The comment read answered 200 in all 17 courses, median 253 ms, and found 12 instructor comments in 4 of them.
   - Page list: REST, about 230 ms.
+  - Home screen, all of it (courses, the month's planner, course colours and
+    the Inbox folder): about 900 ms, of which the Inbox is one read of about
+    560 ms. The individual reads: courses 273 ms, planner 794 ms, colours
+    160 ms, Inbox 560 ms.
+  - Draw time stayed where it was: 0.2-1.7 ms per screen over the 19 screens
+    the dump renders.
 - **Measured against the website** ([baseline](../benchmarks/baseline-2026-10-20.md)), same machine and session, median of 10 runs:
   - Fresh content: 0.27–0.33 s per step in the reader vs 2.1–2.7 s on the website.
   - Requests: 1 per screen vs 130–190.

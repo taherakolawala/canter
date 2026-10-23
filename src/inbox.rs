@@ -369,7 +369,12 @@ pub async fn list(
     } else {
         format!("/api/v1/conversations?scope={scope}&per_page=100")
     };
-    let (mut items, stats) = client.get_all_pages::<Summary>(&path, 10).await?;
+    // Canvas returns conversations newest first, and only the newest
+    // `MAX_CONVERSATIONS` are kept, so one page of that size is the whole
+    // answer: a single read, with any further pages left alone. Following them
+    // meant reading hundreds of older conversations only to throw them away
+    // (four pages and about 4 s on an account with 321 of them).
+    let (mut items, stats) = client.get_json::<Vec<Summary>>(&path).await?;
     if items.iter().any(|c| !valid_id(&c.id)) {
         return Err(CanvasError::Invalid("invalid conversation ID"));
     }
@@ -596,16 +601,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_follows_pages_and_refuses_unsafe_ids() {
+    async fn list_reads_one_page_and_refuses_unsafe_ids() {
+        // Canvas offers a next page, but the newest 100 are all that is kept,
+        // so following it would read older conversations only to drop them.
         let mut first = json(200, r#"[{"id":"1"}]"#).unwrap();
         first.headers.push((
             "link".into(),
             "<https://ufl.instructure.com/api/v1/conversations?page=2>; rel=\"next\"".into(),
         ));
         let t = FakeTransport::new(vec![Ok(first), json(200, r#"[{"id":"2"}]"#)]);
-        let (items, stats) = list(&client(t), Folder::Inbox).await.unwrap();
-        assert_eq!(items.len(), 2);
-        assert_eq!(stats.requests, 2);
+        let (items, stats) = list(&client(t.clone()), Folder::Inbox).await.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(stats.requests, 1);
+        assert_eq!(t.requests.lock().unwrap().len(), 1);
         let t = FakeTransport::new(vec![json(200, r#"[{"id":"../secrets"}]"#)]);
         assert!(list(&client(t), Folder::Inbox).await.is_err());
     }
