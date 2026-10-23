@@ -60,7 +60,7 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
   - All three build-plan performance goals are met.
 - **Downloads**, measured live: a 908 KB PDF in 1.1 s through the full redirect chain, saved, linked and marked as downloaded from the internet.
 - **Announcements live check (2026-10-21).** Rust read all 1,380 announcements across 17 courses and opened one detail in each of the 13 nonempty courses. Median list refresh: 237 ms. The 674-item course took 5.43 s across seven pages, 205 KB; cached lists remain visible while refreshing. Counts match the earlier probe; no account content is included in the report.
-- **Checks.** 234 Rust tests (Windows) and 32 Python tests pass. `tuicanvas --smoke` re-verifies live reads, file access and one download; `tuicanvas --dump DIR` renders each screen headlessly, including the Grades tab and the instructor's feedback, and downloads one file into a scratch library.
+- **Checks.** 235 Rust tests (Windows) and 32 Python tests pass. `tuicanvas --smoke` re-verifies live reads, file access and one download; `tuicanvas --dump DIR` renders each screen headlessly, including the Grades tab and the instructor's feedback, and downloads one file into a scratch library.
 
 - **Images in the terminal** (prototype). Images embedded in assignment, page
   and announcement text are drawn where the text has them, from the copy the
@@ -89,6 +89,7 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
   a cache keyed by file and box size is the fix if that proves annoying. `TUICANVAS_IMAGES=off` restores the plain `[n]`
   marks. Other image files still open in an outside app.
 - **Locked and hidden files.** Files Canvas marks as locked are not downloaded (one past lab here). In 8 of 17 courses the instructor hides Files, so the Files tab is empty there; attachments linked from assignments still work. Two linked files return 403 and can only be opened in the browser.
+- **The grade column is one read per course per run.** With the switch on, entering the course list reads the grades of the courses listed once in a run (a saved total shows at once and is not re-read); a course's own Grades tab is always fresh. So a grade changed mid-session shows on the Grades tab before the course list.
 - **Grades are read, never written.** TUICanvas shows what Canvas computes and does not do its own what-if arithmetic.
 - **The comment marks depend on one read** (`/courses/:id/students/submissions` with `student_ids[]=self`). Where a course refuses it, grades still show but no row is marked. Checked live on 2026-10-22: all 17 courses answered, median 253 ms.
 - **Out of scope for now:** discussions (links to them open in the browser). Quizzes and assessments are permanently out of scope.

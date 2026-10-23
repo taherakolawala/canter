@@ -1422,6 +1422,8 @@ impl App {
                         r.fetched_at = Some(at);
                         r.sync = SyncState::Idle;
                         r.version += 1;
+                        self.clamp_selection();
+                        effects.extend(self.read_course_grades());
                     }
                     (Payload::Announcements(list), ResourceKey::Announcements(c)) => {
                         let r = self.announcements.entry(c.clone()).or_default();
@@ -1870,7 +1872,17 @@ impl App {
         if !self.show_course_grades {
             return vec![];
         }
-        // Read the grades of the courses on screen, where they are not known.
+        self.read_course_grades()
+    }
+
+    /// The grades the course list's grade column needs: one read per course on
+    /// screen whose grades this run does not have yet. Saved copies are shown
+    /// first, and a course already read is left alone, so entering the list
+    /// again costs nothing. A course's own Grades tab is always read fresh.
+    fn read_course_grades(&mut self) -> Vec<Effect> {
+        if !self.show_course_grades || !matches!(self.view().kind, ViewKind::Courses) {
+            return vec![];
+        }
         let ids: Vec<String> = self
             .visible_rows()
             .iter()
@@ -1880,6 +1892,16 @@ impl App {
         let mut effects = Vec::new();
         for id in ids {
             self.load_snapshot(&ResourceKey::Grades(id.clone()));
+            if self
+                .grades
+                .get(&id)
+                .and_then(|r| r.data.as_ref())
+                .is_some_and(|g| g.total.is_some())
+            {
+                // A saved total is shown at once; it is replaced the next time
+                // the course's own Grades tab is read.
+                continue;
+            }
             effects.extend(self.request(ResourceKey::Grades(id), false));
         }
         effects
@@ -7146,6 +7168,34 @@ mod tests {
             app.browser_url().unwrap(),
             format!("{ORIGIN}/courses/10/grades")
         );
+    }
+
+    #[test]
+    fn a_saved_grade_switch_fills_the_column_again_after_a_restart() {
+        let root = std::env::temp_dir().join(format!("tuicanvas-cgrades2-{}", std::process::id()));
+        let store = Arc::new(SnapshotStore::new(&root, "reader"));
+        store.save_show_course_grades(true);
+        // A restart with the switch on reads the grades of the courses listed,
+        // so the column is not blank until a course is opened.
+        let mut app = App::new(ORIGIN, Some(store));
+        let (k, r) = fetch_of(&app.start());
+        let effects = app.update(Msg::Fetched {
+            key: k,
+            request: r,
+            result: Ok((
+                Payload::Courses(vec![course("10", "GPU Computing")]),
+                FetchStats::default(),
+            )),
+            at: Utc::now(),
+        });
+        assert_eq!(fetches(&effects), [ResourceKey::Grades("10".into())]);
+        answer(&mut app, ResourceKey::Grades("10".into()), grades_payload());
+        assert_eq!(app.course_grade("10").unwrap(), "A- 91.5%");
+        // Refreshing the home screen does not read them a second time.
+        let effects = app.update(key(KeyCode::Char('r')));
+        assert!(fetches(&effects).contains(&ResourceKey::Courses));
+        assert!(!fetches(&effects).contains(&ResourceKey::Grades("10".into())));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
