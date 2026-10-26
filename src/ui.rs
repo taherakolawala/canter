@@ -3106,12 +3106,29 @@ fn draw_palette(frame: &mut Frame, area: Rect, app: &App) {
     let hits = app.palette_hits();
     let rect = centered(area, 76, (hits.len() as u16 + 5).min(area.height));
     let inner_width = usize::from(rect.width.saturating_sub(4));
+    // The query, with any `@class` tag picked out, so it is clear the tag is
+    // doing something and not just text.
+    let mut typed: Vec<Span> = vec![Span::styled("search ", theme::faint())];
+    for (i, word) in palette.query.split(' ').enumerate() {
+        if i > 0 {
+            typed.push(Span::raw(" "));
+        }
+        let style = if word.starts_with('@') {
+            theme::accent()
+        } else {
+            theme::bold()
+        };
+        typed.push(Span::styled(word.to_string(), style));
+    }
+    typed.push(Span::styled("▏", theme::key()));
+    if palette.query.is_empty() {
+        typed.push(Span::styled(
+            "  anything, or @ for one class",
+            theme::faint(),
+        ));
+    }
     let mut lines: Vec<Line> = vec![
-        Line::from(vec![
-            Span::styled("search ", theme::faint()),
-            Span::styled(palette.query.clone(), theme::bold()),
-            Span::styled("▏", theme::key()),
-        ]),
+        Line::from(typed),
         Line::styled(format!("  {}", app.palette_coverage()), theme::faint()),
     ];
     let mut selected_line = 0;

@@ -50,6 +50,60 @@ pub enum Target {
     Action(Act),
 }
 
+impl Target {
+    /// The course this result belongs to, where it belongs to one. An `@`
+    /// tag narrows the search to the courses it names, so everything that
+    /// does not sit in a course falls outside it.
+    pub fn course(&self) -> Option<&str> {
+        match self {
+            Target::Course(id)
+            | Target::Assignment(id, _)
+            | Target::Announcement(id, _)
+            | Target::Page(id, _)
+            | Target::File(id, _) => Some(id),
+            Target::Conversation(_) | Target::Action(_) => None,
+        }
+    }
+}
+
+/// A query split into its `@` tags and the words left over.
+///
+/// `@cop4600 lab 2` means "lab 2, in COP4600". The tag is matched against
+/// course names and codes the same way everything else is matched, so a
+/// couple of characters is enough, and several tags widen the net rather
+/// than narrowing it to nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Query {
+    /// The text after each `@`, in the order typed.
+    pub tags: Vec<String>,
+    /// Everything that was not part of a tag.
+    pub text: String,
+    /// Whether the query ends in a tag still being typed, in which case the
+    /// palette offers courses to finish it with.
+    pub tagging: bool,
+}
+
+pub fn parse(query: &str) -> Query {
+    let mut out = Query::default();
+    let mut words: Vec<&str> = Vec::new();
+    for word in query.split_whitespace() {
+        match word.strip_prefix('@') {
+            Some(tag) => out.tags.push(tag.to_string()),
+            None => words.push(word),
+        }
+    }
+    // A tag is still being typed while the cursor is right after it: the last
+    // thing typed starts with `@` and no space has followed.
+    out.tagging = query
+        .split_whitespace()
+        .next_back()
+        .is_some_and(|w| w.starts_with('@'))
+        && !query.ends_with(char::is_whitespace);
+    out.text = words.join(" ");
+    out.tags.retain(|t| !t.is_empty());
+    out
+}
+
 /// What kind of thing a hit is, which decides its badge and its tie-break.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
@@ -239,6 +293,20 @@ fn starts_word(lower: &[char], i: usize) -> bool {
     }
     let before = lower[i - 1];
     !before.is_alphanumeric()
+}
+
+/// The best score the query gets against any of `texts`, or `None` when it
+/// matches none of them. Used for `@` tags, which are matched against both a
+/// course's name and its code.
+///
+/// An empty query matches everything, which is what makes `@` on its own
+/// offer every class.
+pub fn best_of(query: &str, texts: &[&str]) -> Option<i64> {
+    texts
+        .iter()
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| score(query, t).map(|m| m.score))
+        .max()
 }
 
 /// Keep the hits whose title or context matches, best first.

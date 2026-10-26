@@ -210,6 +210,19 @@ impl SnapshotStore {
         self.save_named("local-show-course-grades.json", &on, Utc::now());
     }
 
+    /// Whether the search box includes things in hidden courses. Hiding a
+    /// course tidies the course list; whether it also leaves the search is a
+    /// separate choice, so it is stored separately.
+    pub fn search_hidden(&self) -> bool {
+        self.load_named("local-search-hidden.json")
+            .map(|(on, _)| on)
+            .unwrap_or(false)
+    }
+
+    pub fn save_search_hidden(&self, on: bool) {
+        self.save_named("local-search-hidden.json", &on, Utc::now());
+    }
+
     /// Conversations read in TUICanvas. Canvas is never told, so this is the
     /// only record of it and it is kept apart from refreshed snapshots.
     pub fn conversation_reads(&self) -> std::collections::BTreeSet<String> {

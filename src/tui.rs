@@ -1008,6 +1008,16 @@ pub fn dump(config: &Config, out: &Path, course: &str, assignment: &str) -> Resu
         app.update(press(KeyCode::Char(c)));
     }
     step(&mut app, vec![], "4c-search-lab", &mut timings)?;
+    // An `@` tag being typed, which offers the classes it could mean, with
+    // hidden courses brought in so the dump shows more than a short list.
+    app.update(press(KeyCode::Esc));
+    app.update(press(KeyCode::Char('/')));
+    app.update(Msg::Key(KeyEvent::new(
+        KeyCode::Char('h'),
+        KeyModifiers::CONTROL,
+    )));
+    app.update(press(KeyCode::Char('@')));
+    step(&mut app, vec![], "4d-search-class", &mut timings)?;
     app.update(press(KeyCode::Esc));
     // Modules, and the first page in them, when Canvas shows Modules.
     while app.stack.len() > 2 {

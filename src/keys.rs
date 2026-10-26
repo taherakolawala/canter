@@ -523,6 +523,9 @@ pub static BINDINGS: &[Binding] = &[
     b(Act::InputClear, &[Key::Ctrl('u')], &[Palette], "clear")
         .title("Clear what is typed")
         .hint(3),
+    b(Act::ShowHidden, &[Key::Ctrl('h')], &[Palette], "hidden")
+        .title("Search inside hidden courses too")
+        .hint(5),
     b(Act::InputCancel, &[ESC], &[Palette], "close")
         .title("Close the search")
         .hint(4),

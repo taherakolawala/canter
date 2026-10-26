@@ -770,6 +770,8 @@ pub struct App {
     warm_keys: Vec<ResourceKey>,
     /// The warm-up is queued once per run.
     warmed: bool,
+    /// Whether things in hidden courses are searchable.
+    pub search_hidden: bool,
     /// Whether to warm the palette's index at all.
     ///
     /// Off unless the reader is being driven by a person: it is the one place
@@ -868,6 +870,7 @@ impl App {
             .map(|s| s.seen_feedback())
             .unwrap_or_default();
         let show_course_grades = store.as_ref().is_some_and(|s| s.show_course_grades());
+        let search_hidden = store.as_ref().is_some_and(|s| s.search_hidden());
         let conversation_reads = store
             .as_ref()
             .map(|s| s.conversation_reads())
@@ -915,6 +918,7 @@ impl App {
             warm_running: 0,
             warm_keys: Vec::new(),
             warmed: false,
+            search_hidden,
             warm_up: false,
             help: None,
             tabs: HashMap::new(),
@@ -3316,6 +3320,10 @@ impl App {
                 }
                 .into()
             }
+            Act::ShowHidden if self.palette.is_some() && self.search_hidden => {
+                "Stop searching hidden courses".into()
+            }
+            Act::ShowHidden if self.palette.is_some() => "Search hidden courses too".into(),
             Act::ShowHidden if self.show_hidden => "Stop showing hidden courses".into(),
             Act::ShowHidden => "Show hidden courses".into(),
             Act::ShowGrades if self.show_course_grades => "Hide course grades".into(),
@@ -3616,6 +3624,16 @@ impl App {
             self.warm_queue
                 .push_back(ResourceKey::Conversations(folder.id().into()));
         }
+        // Every saved copy, now, before a single request. These are small
+        // files on disk: reading them needs no slot and nothing to wait for,
+        // so the box is useful at once and the reads that follow only bring
+        // it up to date. Trickling them through the same two slots as the
+        // requests, which is what this did at first, made a search wait on
+        // the network to show an answer it already had.
+        let queued: Vec<ResourceKey> = self.warm_queue.iter().cloned().collect();
+        for key in queued {
+            self.load_snapshot(&key);
+        }
         self.warm_next()
     }
 
@@ -3648,14 +3666,13 @@ impl App {
             let Some(key) = self.warm_queue.pop_front() else {
                 break;
             };
-            // Already read, or being read for the screen in front of us.
-            if self.has_data(&key) || matches!(self.sync_of(&key), Some(SyncState::Syncing { .. }))
+            // Read already this run, or being read for the screen in front
+            // of us. A saved copy does not stop the read: it is already on
+            // screen, and this brings it up to date, because a search that
+            // quietly answers from last week is worse than one that waits.
+            if self.read_this_run(&key)
+                || matches!(self.sync_of(&key), Some(SyncState::Syncing { .. }))
             {
-                continue;
-            }
-            self.load_snapshot(&key);
-            if self.has_data(&key) {
-                // A saved copy is enough to search; leave Canvas alone.
                 continue;
             }
             if let Some(effect) = self.request(key.clone(), false) {
@@ -3677,21 +3694,17 @@ impl App {
         vec![]
     }
 
-    /// Whether a resource already has something to search.
-    fn has_data(&self, key: &ResourceKey) -> bool {
+    /// Whether this resource has already been read from Canvas in this run,
+    /// by the warm-up or by the user opening the screen that shows it.
+    fn read_this_run(&self, key: &ResourceKey) -> bool {
+        let fresh = |origin: Option<Origin>| origin == Some(Origin::Network);
         match key {
-            ResourceKey::Assignments(c) => self.assignments.get(c).is_some_and(|r| r.data.is_some()),
-            ResourceKey::Announcements(c) => {
-                self.announcements.get(c).is_some_and(|r| r.data.is_some())
-            }
-            ResourceKey::Tabs(c) => self.tabs.get(c).is_some_and(|r| r.data.is_some()),
-            ResourceKey::Pages(c) => self.page_lists.get(c).is_some_and(|r| r.data.is_some()),
-            ResourceKey::Files(c) => {
-                self.course_files.get(c).is_some_and(|r| r.data.is_some())
-            }
-            ResourceKey::Conversations(f) => {
-                self.conversations.get(f).is_some_and(|r| r.data.is_some())
-            }
+            ResourceKey::Assignments(c) => fresh(self.assignments.get(c).map(|r| r.origin)),
+            ResourceKey::Announcements(c) => fresh(self.announcements.get(c).map(|r| r.origin)),
+            ResourceKey::Tabs(c) => fresh(self.tabs.get(c).map(|r| r.origin)),
+            ResourceKey::Pages(c) => fresh(self.page_lists.get(c).map(|r| r.origin)),
+            ResourceKey::Files(c) => fresh(self.course_files.get(c).map(|r| r.origin)),
+            ResourceKey::Conversations(f) => fresh(self.conversations.get(f).map(|r| r.origin)),
             _ => false,
         }
     }
@@ -3718,6 +3731,9 @@ impl App {
         use crate::search::{Hit, Kind, Target};
         let mut pool: Vec<Hit> = Vec::new();
         for course in self.courses.data.as_deref().unwrap_or(&[]) {
+            if !self.searchable_course(&course.id) {
+                continue;
+            }
             let hidden = self.hidden_courses.contains(&course.id);
             let context = match (hidden, course.term.as_ref().and_then(|t| t.name.as_deref())) {
                 (true, _) => "hidden".to_string(),
@@ -3732,6 +3748,9 @@ impl App {
             ));
         }
         for (course_id, resource) in &self.assignments {
+            if !self.searchable_course(course_id) {
+                continue;
+            }
             let course = self.course_title(course_id);
             for item in resource.data.as_deref().unwrap_or(&[]) {
                 pool.push(Hit::new(
@@ -3743,6 +3762,9 @@ impl App {
             }
         }
         for (course_id, resource) in &self.announcements {
+            if !self.searchable_course(course_id) {
+                continue;
+            }
             let course = self.course_title(course_id);
             for item in resource.data.as_deref().unwrap_or(&[]) {
                 pool.push(Hit::new(
@@ -3754,6 +3776,9 @@ impl App {
             }
         }
         for (course_id, resource) in &self.page_lists {
+            if !self.searchable_course(course_id) {
+                continue;
+            }
             let course = self.course_title(course_id);
             for page in resource.data.as_deref().unwrap_or(&[]) {
                 let Some(slug) = page.slug() else {
@@ -3768,6 +3793,9 @@ impl App {
             }
         }
         for (course_id, resource) in &self.course_files {
+            if !self.searchable_course(course_id) {
+                continue;
+            }
             let course = self.course_title(course_id);
             let files = resource.data.as_ref().and_then(|d| d.files.as_deref());
             for file in files.unwrap_or(&[]) {
@@ -3808,31 +3836,163 @@ impl App {
         pool
     }
 
-    /// The results to draw, best first.
-    pub fn palette_hits(&self) -> Vec<crate::search::Hit> {
-        let query = self
-            .palette
-            .as_ref()
-            .map(|p| p.query.as_str())
-            .unwrap_or_default();
-        crate::search::rank(query, self.palette_pool(), PALETTE_RESULTS)
+    /// The courses an `@` tag names, best match first.
+    ///
+    /// A tag is matched against course names and codes the same way anything
+    /// else is, so `@cop46` is enough, and `@` with nothing after it names
+    /// every course, which is what makes the suggestions useful.
+    fn ranked_courses(&self, tag: &str) -> Vec<(i64, String)> {
+        let mut found: Vec<(i64, String)> = Vec::new();
+        for course in self.courses.data.as_deref().unwrap_or(&[]) {
+            if !self.searchable_course(&course.id) {
+                continue;
+            }
+            let code = course.course_code.as_deref().unwrap_or("");
+            let best = crate::search::best_of(tag, &[course.title(), code]);
+            if let Some(score) = best {
+                found.push((score, course.id.clone()));
+            }
+        }
+        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found
     }
 
-    /// What the palette says under the box about how much it can see.
+    /// The class an `@` tag means: the best match, and anything tied with it.
+    ///
+    /// Not every class the letters appear in. `@comp` is a subsequence of
+    /// both "Compilers" and "GPU Computing", and a tag that keeps both has
+    /// not narrowed anything, which is the whole point of typing it. While
+    /// the tag is still being typed the palette offers every match, ranked,
+    /// so a tie is visible and can be settled with one more character.
+    fn tagged_courses(&self, tag: &str) -> Vec<String> {
+        let ranked = self.ranked_courses(tag);
+        let Some(&(best, _)) = ranked.first() else {
+            return vec![];
+        };
+        ranked
+            .into_iter()
+            .take_while(|(score, _)| *score == best)
+            .map(|(_, id)| id)
+            .collect()
+    }
+
+    /// Whether a course's contents belong in the search at all.
+    fn searchable_course(&self, course_id: &str) -> bool {
+        self.search_hidden || !self.hidden_courses.contains(course_id)
+    }
+
+    /// Include or exclude everything in hidden courses, and remember it.
+    fn toggle_search_hidden(&mut self) {
+        self.search_hidden = !self.search_hidden;
+        if let Some(store) = &self.store {
+            store.save_search_hidden(self.search_hidden);
+        }
+        if let Some(palette) = &mut self.palette {
+            palette.selected = 0;
+        }
+        self.dirty = true;
+    }
+
+    /// The results to draw, best first.
+    ///
+    /// `@tag` narrows to the courses it names before anything is ranked, so
+    /// the words after it compete only inside those courses.
+    pub fn palette_hits(&self) -> Vec<crate::search::Hit> {
+        let Some(palette) = &self.palette else {
+            return vec![];
+        };
+        let query = crate::search::parse(&palette.query);
+        let pool = self.palette_pool();
+        // A tag still being typed: offer the courses that would finish it,
+        // rather than the results of a class nobody has named yet.
+        if query.tagging && query.text.is_empty() {
+            let partial = query.tags.last().cloned().unwrap_or_default();
+            // Every class the tag could mean, best first, so a tie between
+            // two of them is on screen rather than silently resolved.
+            let ranked = self.ranked_courses(&partial);
+            let courses: Vec<crate::search::Hit> = pool
+                .into_iter()
+                .filter(|h| matches!(h.kind, crate::search::Kind::Course))
+                .collect();
+            return ranked
+                .into_iter()
+                .filter_map(|(_, id)| {
+                    courses
+                        .iter()
+                        .find(|h| h.target.course() == Some(id.as_str()))
+                        .cloned()
+                })
+                .take(PALETTE_RESULTS)
+                .collect();
+        }
+        if query.tags.is_empty() {
+            return crate::search::rank(&query.text, pool, PALETTE_RESULTS);
+        }
+        let wanted: Vec<String> = query
+            .tags
+            .iter()
+            .flat_map(|t| self.tagged_courses(t))
+            .collect();
+        let narrowed: Vec<crate::search::Hit> = pool
+            .into_iter()
+            .filter(|h| {
+                h.target
+                    .course()
+                    .is_some_and(|c| wanted.iter().any(|w| w == c))
+            })
+            .collect();
+        crate::search::rank(&query.text, narrowed, PALETTE_RESULTS)
+    }
+
+    /// What the palette says under the box: the class it is narrowed to, and
+    /// how much of the account it can see.
     ///
     /// A search that cannot find a course is confusing unless it admits it
     /// has not read everything yet, so the count stays on screen.
     pub fn palette_coverage(&self) -> String {
-        let courses = self.courses.data.as_deref().unwrap_or(&[]).len();
+        let query = self
+            .palette
+            .as_ref()
+            .map(|p| crate::search::parse(&p.query))
+            .unwrap_or_default();
+        if !query.tags.is_empty() {
+            let names: Vec<String> = query
+                .tags
+                .iter()
+                .flat_map(|t| self.tagged_courses(t))
+                .map(|id| self.course_title(&id))
+                .collect();
+            return match names.len() {
+                0 => format!(
+                    "@{} matches no class you can search",
+                    query.tags.join(", @")
+                ),
+                1 => format!("in {}", names[0]),
+                n => format!("in {} and {} more", names[0], n - 1),
+            };
+        }
+        let courses = self
+            .courses
+            .data
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter(|c| self.searchable_course(&c.id))
+            .count();
         let read = self
             .assignments
-            .values()
-            .filter(|r| r.data.is_some())
+            .iter()
+            .filter(|(id, r)| r.data.is_some() && self.searchable_course(id))
             .count();
-        if self.warm_queue.is_empty() && read >= courses {
-            format!("searching everything in {courses} courses")
+        let hidden = if self.search_hidden {
+            ", hidden included"
         } else {
-            format!("searching {read} of {courses} courses, still reading")
+            ""
+        };
+        if self.warm_queue.is_empty() && self.warm_running == 0 && read >= courses {
+            format!("searching {courses} courses{hidden} \u{b7} @ a class to narrow")
+        } else {
+            format!("searching {read} of {courses} courses{hidden}, still reading")
         }
     }
 
@@ -3849,6 +4009,7 @@ impl App {
                 palette.selected = 0;
             }
             Act::InputCancel | Act::Palette => self.palette = None,
+            Act::ShowHidden => self.toggle_search_hidden(),
             Act::Open => {
                 let selected = palette.selected;
                 let Some(hit) = self.palette_hits().into_iter().nth(selected) else {
@@ -6098,10 +6259,11 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_copy_spares_the_warm_up_a_read() {
-        // Why a second run costs almost nothing: the lists are on disk, and
-        // searching a saved copy is better than reading seventeen courses
-        // again to find out they have not changed.
+    fn a_saved_copy_is_searchable_at_once_and_still_refreshed() {
+        // Both halves matter. The saved copy has to be searchable before any
+        // request comes back, or the box makes you wait for an answer it
+        // already has; and it still has to be read, or a course you have not
+        // opened in a week is searched as it was a week ago without saying so.
         let root = std::env::temp_dir().join(format!("tuicanvas-warm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let store = Arc::new(SnapshotStore::new(&root, "reader"));
@@ -6118,6 +6280,16 @@ mod tests {
         app.warm_up = true;
         let (k, r) = fetch_of(&app.start());
         let effects = deliver_back(&mut app, k, r, Payload::Courses(vec![course("10", "GPU")]));
+        // Searchable straight away, with nothing having come back yet.
+        app.update(key(KeyCode::Char('/')));
+        for c in "lab".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        assert!(
+            app.palette_hits().iter().any(|h| h.title == "Lab 2"),
+            "the saved assignment is there before any read finished"
+        );
+        // And the read was still started.
         let asked: Vec<ResourceKey> = effects
             .iter()
             .filter_map(|e| match e {
@@ -6126,19 +6298,8 @@ mod tests {
             })
             .collect();
         assert!(
-            !asked.contains(&ResourceKey::Assignments("10".into())),
-            "the saved list was enough: {asked:?}"
-        );
-        // And it is searchable straight away.
-        app.update(key(KeyCode::Char('/')));
-        for c in "lab".chars() {
-            app.update(key(KeyCode::Char(c)));
-        }
-        assert!(
-            app.palette_hits()
-                .iter()
-                .any(|h| h.title == "Lab 2"),
-            "a saved assignment is searchable without any read"
+            asked.contains(&ResourceKey::Assignments("10".into())),
+            "the saved copy is brought up to date: {asked:?}"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -6155,6 +6316,215 @@ mod tests {
             "nothing is read that nobody asked for: {effects:?}"
         );
         assert!(app.warm_queue.is_empty());
+    }
+
+    /// A palette over two courses, each with one assignment of the same name,
+    /// which is the case `@` exists for.
+    fn tagged_app() -> App {
+        let mut app = app_with_courses();
+        for (course, id) in [("10", "7"), ("20", "9")] {
+            app.assignments.entry(course.into()).or_default().data = Some(vec![AssignmentSummary {
+                id: id.into(),
+                name: Some("Project 1".into()),
+                ..Default::default()
+            }]);
+        }
+        app.update(key(KeyCode::Char('/')));
+        app
+    }
+
+    #[test]
+    fn an_at_tag_narrows_the_search_to_one_class() {
+        let mut app = tagged_app();
+        type_query(&mut app, "project");
+        assert_eq!(
+            app.palette_hits()
+                .iter()
+                .filter(|h| h.kind == crate::search::Kind::Assignment)
+                .count(),
+            2,
+            "both courses have one"
+        );
+        // Naming the class leaves only its own.
+        app.update(ctrl('u'));
+        type_query(&mut app, "@compilers project");
+        let hits = app.palette_hits();
+        let found: Vec<&crate::search::Target> = hits
+            .iter()
+            .filter(|h| h.kind == crate::search::Kind::Assignment)
+            .map(|h| &h.target)
+            .collect();
+        assert_eq!(
+            found,
+            [&crate::search::Target::Assignment("20".into(), "9".into())]
+        );
+        assert_eq!(app.palette_coverage(), "in Compilers");
+    }
+
+    #[test]
+    fn a_tag_matches_a_class_the_way_everything_else_is_matched() {
+        let mut app = tagged_app();
+        // Part of the name is enough, and so is the course code.
+        for tag in ["@comp", "@cmplrs", "@Compilers"] {
+            app.update(ctrl('u'));
+            type_query(&mut app, &format!("{tag} project"));
+            let hits = app.palette_hits();
+            assert!(
+                hits.iter().any(|h| h.target
+                    == crate::search::Target::Assignment("20".into(), "9".into())),
+                "{tag} should reach Compilers"
+            );
+            assert!(
+                !hits.iter().any(|h| h.target
+                    == crate::search::Target::Assignment("10".into(), "7".into())),
+                "{tag} should not reach the other course"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tag_being_typed_offers_the_classes_to_finish_it_with() {
+        let mut app = tagged_app();
+        type_query(&mut app, "@");
+        let hits = app.palette_hits();
+        assert!(
+            hits.iter().all(|h| h.kind == crate::search::Kind::Course),
+            "only classes are offered: {hits:?}"
+        );
+        assert_eq!(hits.len(), 2);
+        type_query(&mut app, "comp");
+        let hits = app.palette_hits();
+        assert_eq!(hits.len(), 2, "both still match 'comp' as a subsequence");
+        assert_eq!(hits[0].title, "Compilers", "the better match leads");
+    }
+
+    #[test]
+    fn a_tag_that_names_no_class_says_so_rather_than_searching_everything() {
+        let mut app = tagged_app();
+        type_query(&mut app, "@zzzz project");
+        assert!(
+            app.palette_hits().is_empty(),
+            "narrowing to nothing finds nothing, rather than quietly ignoring the tag"
+        );
+        assert_eq!(
+            app.palette_coverage(),
+            "@zzzz matches no class you can search"
+        );
+    }
+
+    #[test]
+    fn tags_narrow_sensibly_on_real_course_names() {
+        // The names in the owner's account, including the pairs that make
+        // this hard: two COP courses, and two courses whose names both begin
+        // "Introduction to G".
+        let names = [
+            ("1", "COP4600 - Operating Systems - S2026 - Campus"),
+            ("2", "COP5556-178C(27318) - Program Language Prin"),
+            ("3", "EEL5934 - Introduction to GPU Computing"),
+            ("4", "Introduction to Git and GitHub"),
+            ("5", "CDA4102/5155: Computer Architecture"),
+            ("6", "CISE Undergraduate Advising"),
+            ("7", "First Year Engineering Advising 2024"),
+        ];
+        let mut app = App::new(ORIGIN, None);
+        let (k, r) = fetch_of(&app.start());
+        deliver(
+            &mut app,
+            k,
+            r,
+            Payload::Courses(names.iter().map(|(id, n)| course(id, n)).collect()),
+        );
+        let resolves = |app: &App, tag: &str| -> Vec<String> {
+            app.tagged_courses(tag)
+                .into_iter()
+                .map(|id| app.course_title(&id))
+                .collect()
+        };
+        assert_eq!(
+            resolves(&app, "cop4600"),
+            ["COP4600 - Operating Systems - S2026 - Campus"]
+        );
+        assert_eq!(
+            resolves(&app, "cop5556"),
+            ["COP5556-178C(27318) - Program Language Prin"]
+        );
+        assert_eq!(resolves(&app, "git"), ["Introduction to Git and GitHub"]);
+        assert_eq!(resolves(&app, "gpu"), ["EEL5934 - Introduction to GPU Computing"]);
+        assert_eq!(resolves(&app, "cda"), ["CDA4102/5155: Computer Architecture"]);
+        assert_eq!(resolves(&app, "cise"), ["CISE Undergraduate Advising"]);
+        // Two courses have "Advising" in the name. The tag resolves to the
+        // better match rather than keeping both, and the coverage line names
+        // which one, so the choice is never silent.
+        assert_eq!(resolves(&app, "advising"), ["CISE Undergraduate Advising"]);
+        app.update(key(KeyCode::Char('/')));
+        for c in "@advising quiz".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.palette_coverage(), "in CISE Undergraduate Advising");
+        // While the tag is still being typed, both are offered, in order, so
+        // the other one is a keystroke away rather than hidden.
+        app.update(ctrl('u'));
+        for c in "@advising".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        let offered: Vec<String> = app
+            .palette_hits()
+            .into_iter()
+            .map(|h| h.title)
+            .collect();
+        assert_eq!(
+            offered,
+            [
+                "CISE Undergraduate Advising",
+                "First Year Engineering Advising 2024"
+            ]
+        );
+    }
+
+    #[test]
+    fn hidden_courses_are_out_of_the_search_until_that_is_turned_on() {
+        let mut app = tagged_app();
+        app.hidden_courses.insert("20".into());
+        type_query(&mut app, "project");
+        let found = |app: &App| {
+            app.palette_hits()
+                .iter()
+                .any(|h| h.target == crate::search::Target::Assignment("20".into(), "9".into()))
+        };
+        assert!(!found(&app), "work in a hidden course is not searched");
+        assert!(
+            !app.palette_hits()
+                .iter()
+                .any(|h| h.target == crate::search::Target::Course("20".into())),
+            "nor is the course itself"
+        );
+        // Ctrl+H brings them in, and says so.
+        app.update(ctrl('h'));
+        assert!(found(&app), "and is searched once that is turned on");
+        assert!(
+            app.palette_coverage().contains("hidden included"),
+            "{}",
+            app.palette_coverage()
+        );
+        // An @ tag cannot reach around the switch either.
+        app.update(ctrl('h'));
+        app.update(ctrl('u'));
+        type_query(&mut app, "@compilers project");
+        assert!(app.palette_hits().is_empty());
+    }
+
+    #[test]
+    fn the_hidden_switch_is_remembered() {
+        let root = std::env::temp_dir().join(format!("tuicanvas-shid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Arc::new(SnapshotStore::new(&root, "reader"));
+        let mut app = App::new(ORIGIN, Some(store.clone()));
+        app.update(key(KeyCode::Char('/')));
+        app.update(ctrl('h'));
+        assert!(app.search_hidden);
+        let next = App::new(ORIGIN, Some(store));
+        assert!(next.search_hidden, "still on after a restart");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
