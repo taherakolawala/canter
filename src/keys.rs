@@ -28,6 +28,8 @@ pub enum Act {
     NextSection,
     PrevSection,
     Search,
+    /// Open the search palette.
+    Palette,
     Refresh,
     Browser,
     Menu,
@@ -57,7 +59,7 @@ pub enum Act {
 
 impl Act {
     #[cfg(test)]
-    pub const ALL: [Act; 38] = [
+    pub const ALL: [Act; 39] = [
         Act::Up,
         Act::Down,
         Act::Left,
@@ -71,6 +73,7 @@ impl Act {
         Act::NextSection,
         Act::PrevSection,
         Act::Search,
+        Act::Palette,
         Act::Refresh,
         Act::Browser,
         Act::Menu,
@@ -134,8 +137,8 @@ pub enum Scope {
     Conversation,
     Assignment,
     SignedOut,
-    /// Typing in a list's search box.
-    Filter,
+    /// Typing in the search palette.
+    Palette,
     /// Typing a file path to submit.
     PathInput,
     /// Typing the text or the web address to submit.
@@ -334,8 +337,8 @@ pub static BINDINGS: &[Binding] = &[
         .title("Scroll down")
         .hint(1)
         .shown("↑↓"),
-    b(Act::Up, &[UP], &[Menu, MenuSearch, Filter], "move").title("Move up"),
-    b(Act::Down, &[DOWN], &[Menu, MenuSearch, Filter], "move").title("Move down"),
+    b(Act::Up, &[UP], &[Menu, MenuSearch], "move").title("Move up"),
+    b(Act::Down, &[DOWN], &[Menu, MenuSearch], "move").title("Move down"),
     b(Act::Up, &[UP], &[PathInput], "suggestions").title("Previous suggestion"),
     b(Act::Down, &[DOWN], &[PathInput], "suggestions")
         .title("Next suggestion")
@@ -394,9 +397,10 @@ pub static BINDINGS: &[Binding] = &[
     )
     .title("Previous section"),
     // Screen-wide.
-    b(Act::Search, &[ch('/')], &[List], "search")
-        .title("Search this list")
-        .hint(7),
+    b(Act::Palette, &[ch('/'), Key::Ctrl('k')], &[Screen], "search")
+        .title("Search for anything")
+        .hint(7)
+        .shown("/"),
     b(Act::Search, &[ch('/')], &[Menu], "search")
         .title("Search the actions")
         .hint(3),
@@ -508,12 +512,20 @@ pub static BINDINGS: &[Binding] = &[
         .title("Write to this course's teachers")
         .menu('N', Group::Selected),
     // Text boxes and confirmation.
-    b(Act::InputDone, &[ENTER], &[Filter], "keep")
-        .title("Keep this search")
+    b(Act::Open, &[ENTER], &[Palette], "go")
+        .title("Open what is selected")
         .hint(1),
-    b(Act::InputCancel, &[ESC], &[Filter], "clear")
-        .title("Clear the search")
-        .hint(2),
+    b(Act::Up, &[UP], &[Palette], "move").title("Previous result"),
+    b(Act::Down, &[DOWN], &[Palette], "move")
+        .title("Next result")
+        .hint(2)
+        .shown("↑↓"),
+    b(Act::InputClear, &[Key::Ctrl('u')], &[Palette], "clear")
+        .title("Clear what is typed")
+        .hint(3),
+    b(Act::InputCancel, &[ESC], &[Palette], "close")
+        .title("Close the search")
+        .hint(4),
     b(Act::InputDone, &[ENTER], &[PathInput], "add / review")
         .title("Add the file, or review when done")
         .hint(1),
@@ -606,7 +618,7 @@ pub const CORE: &[(Key, Act)] = &[
     (ESC, Act::Back),
     (TAB, Act::NextSection),
     (BACKTAB, Act::PrevSection),
-    (ch('/'), Act::Search),
+    (ch('/'), Act::Palette),
     (ch('r'), Act::Refresh),
     (ch('o'), Act::Browser),
     (ch(' '), Act::Menu),
@@ -618,7 +630,7 @@ pub const CORE: &[(Key, Act)] = &[
 pub fn typing(scopes: &[Scope]) -> bool {
     scopes
         .iter()
-        .any(|s| matches!(s, Filter | PathInput | TextInput | MenuSearch | Compose))
+        .any(|s| matches!(s, Palette | PathInput | TextInput | MenuSearch | Compose))
 }
 
 pub fn key_of(event: &KeyEvent) -> Key {
@@ -787,7 +799,7 @@ mod tests {
             .collect();
         out.extend(signed_out);
         out.extend([
-            vec![Filter],
+            vec![Palette],
             vec![PathInput],
             vec![TextInput],
             vec![Review],
@@ -834,8 +846,16 @@ mod tests {
     fn core_keys_keep_one_meaning() {
         for scopes in contexts()
             .into_iter()
-            // The confirmation screens bind Esc to leaving the draft alone.
-            .filter(|s| !typing(s) && !s.contains(&Review) && !s.contains(&MessageReview))
+            // The confirmation screens bind Esc to leaving the draft alone,
+            // and the open actions menu binds `/` to searching itself rather
+            // than opening the palette. Both are overlays with their own box
+            // on screen, so neither can be mistaken for the screen beneath.
+            .filter(|s| {
+                !typing(s)
+                    && !s.contains(&Review)
+                    && !s.contains(&MessageReview)
+                    && !s.contains(&Menu)
+            })
         {
             for (key, act) in CORE {
                 if let Some(binding) = lookup(*key, &scopes) {

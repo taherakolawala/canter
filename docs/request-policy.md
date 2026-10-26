@@ -39,6 +39,18 @@ Sending is never a consequence of reading. Each request below is made only from 
 | Reply to a conversation | `POST /api/v1/conversations/:id/add_message` with `body` | `R` on an open conversation, then `Ctrl+D` to review, then `y` | Only `body` is sent: no `workflow_state` and nothing else that would change the conversation's read state. The conversation must have been read from Canvas in the last two minutes, so the review shows the thread that is really there. Canvas must answer with the same conversation id and at least one message, or the reply is reported as failed rather than assumed sent. On success the conversation and the folder list are read again. |
 | New message to a course's teachers | `POST /api/v1/conversations` with `recipients[]=course_<id>_teachers`, `subject`, `body`, `context_code=course_<id>`, `mode=sync` | `N` on the course list, then `Ctrl+D` to review, then `y` | Recipients are named by Canvas context code, so no recipient-search read is added and the review can state exactly who receives it. Each teacher gets a separate conversation, which the review says. Canvas must answer with at least one created conversation. Subject at most 255 characters, body at most 8,000; an empty or oversized message is refused before the review and again before the request. |
 
+## The search warm-up
+
+`/` and `Ctrl+K` search what the reader already has; searching itself sends nothing. For that to be worth anything the lists have to be in hand, and nothing reads a course the user never opens, so the reader fetches them in the background.
+
+| Request | Trigger | Rules |
+| --- | --- | --- |
+| Each course's assignment list, announcement list and tab list; then its page list and file listing where its tabs say it has them; and the five Inbox folders | The course list arriving, once per run | Queued, not fired at once: at most two warm-up reads are in flight, out of the four the executor allows, so the screen the user is on is never left queued behind the warm-up. A list already read, already being read, or available as a saved copy is skipped. A failure drops that list from the search and the queue carries on. Hidden courses are included, because hiding one tidies the course list rather than saying to forget the course. |
+
+**What it costs here.** 17 courses means 51 reads for the assignment, announcement and tab lists, plus 3 page lists and 9 file listings where the tabs allow them, plus the 5 Inbox folders: **68 reads**, about 14 seconds of background traffic at two at a time. That is the first run only. A list already on disk is not read again, so from the second run the warm-up is a disk walk and asks Canvas for nothing. The price of that is staleness: a course not opened for a week is searched as it was a week ago, and only opening it refreshes what the search knows.
+
+This is the one place the reader asks Canvas for something the user did not ask for, so it is bounded on every side: once per run, nothing re-read, no second attempt after a failure, and off entirely unless a person is driving the reader (the headless walk-through, the benchmark and the tests state exactly what they fetch). Every list it reads is one the user could have reached by opening the course, and it is read exactly the way opening the course would read it. The palette shows how far it has got rather than presenting a partial index as the whole account.
+
 ## File downloads
 
 | Download | Request | Trigger | Rules |

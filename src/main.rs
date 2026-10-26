@@ -22,6 +22,7 @@ mod model;
 mod modules;
 mod procstats;
 mod protect;
+mod search;
 mod session;
 mod signin;
 mod signin_view;

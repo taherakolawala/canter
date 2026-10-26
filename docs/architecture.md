@@ -319,7 +319,8 @@ sequenceDiagram
 | Event-driven, coalesced redraws | `tui.rs` | Zero CPU when idle; one draw per batch of changes |
 | Visible-rows-only tables | `ui.rs` | Drawing cost does not grow with list length |
 | Description converted once per width | `ui.rs`, `html.rs` | Scrolling never re-parses HTML |
-| Local filtering | `app.rs` | `/` filters loaded rows without any request |
+| Search palette | `search.rs`, `app.rs` | `/` or `Ctrl+K` searches everything already read, without any request. Matching is a subsequence maximised by a small dynamic program, so each character is placed where the whole query scores best rather than where it first fits; adjacency pays more than a word start, or three scattered word starts would beat the literal word. A title match always outranks one that only matched the course a thing sits in, and a context match must contain the query as text, because scattered letters are findable in almost any long context. |
+| Search warm-up | `app.rs` | The lists the palette needs, queued when the course list arrives and read two at a time so the screen in front of the user keeps half the executor's capacity. Once per run, nothing re-read, off unless a person is driving. |
 | Session reuse and cookie rotation | `session.rs`, `tui.rs` | No browser and no Duo while the session is valid; rotated cookies are saved back |
 | Native sign-in check | `terminal_login.py` | Sign-in finishes as soon as Canvas accepts the session, without waiting on page elements |
 | One listing per course's Files | `api.rs`, `app.rs` | The folders and files reads run together (about 300 ms for 2 requests here); moving between folders and searching need no request |

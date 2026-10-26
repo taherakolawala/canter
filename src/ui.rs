@@ -492,6 +492,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.menu.is_some() {
         draw_menu(frame, main, app);
     }
+    if app.palette.is_some() {
+        draw_palette(frame, main, app);
+    }
     if app.help.is_some() {
         draw_help(frame, main, app);
     }
@@ -717,22 +720,7 @@ fn hint_spans(hints: &[(&str, &str)]) -> Vec<Span<'static>> {
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
-    let view = app.view();
-    let left: Vec<Span> = if view.filtering {
-        vec![
-            Span::styled("/", theme::key()),
-            Span::styled(view.filter.clone(), theme::bold()),
-            Span::styled("▏", theme::key()),
-            Span::raw("  "),
-        ]
-        .into_iter()
-        .chain({
-            let hints = keys::hint_line(&app.scopes(), &|_| true, usize::from(area.width));
-            let pairs: Vec<(&str, &str)> = hints.iter().map(|(k, l)| (k.as_str(), *l)).collect();
-            hint_spans(&pairs)
-        })
-        .collect()
-    } else if app.login_required {
+    let left: Vec<Span> = if app.login_required {
         vec![Span::styled(
             " Signed out or session expired — press L to sign in ",
             theme::alert(),
@@ -748,11 +736,6 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         let hints = keys::hint_line(&scopes, &|a| app.available(a), budget);
         let pairs: Vec<(&str, &str)> = hints.iter().map(|(k, l)| (k.as_str(), *l)).collect();
         let mut spans = Vec::new();
-        if !view.filter.is_empty() && !view.filtering {
-            spans.push(Span::styled("filter ", theme::muted()));
-            spans.push(Span::styled(view.filter.clone(), theme::code()));
-            spans.push(Span::raw("  "));
-        }
         spans.extend(hint_spans(&pairs));
         spans
     };
@@ -824,12 +807,8 @@ fn placeholder<T>(frame: &mut Frame, area: Rect, res: Option<&Resource<T>>, what
     true
 }
 
-fn empty_message(frame: &mut Frame, area: Rect, filter: &str, what: &str) {
-    let text = if filter.is_empty() {
-        format!("No {what}.")
-    } else {
-        format!("No {what} match “{filter}”.")
-    };
+fn empty_message(frame: &mut Frame, area: Rect, what: &str) {
+    let text = format!("No {what}.");
     frame.render_widget(
         Paragraph::new(Line::styled(text, theme::muted())).alignment(Alignment::Center),
         Rect {
@@ -1244,7 +1223,6 @@ fn draw_courses(frame: &mut Frame, area: Rect, app: &mut App) {
     let rows = app.visible_rows();
     if rows.is_empty() {
         if !app.show_hidden
-            && app.view().filter.is_empty()
             && app.courses.data.as_ref().is_some_and(|c| !c.is_empty())
         {
             frame.render_widget(
@@ -1258,7 +1236,7 @@ fn draw_courses(frame: &mut Frame, area: Rect, app: &mut App) {
                 },
             );
         } else {
-            empty_message(frame, area, &app.view().filter, "courses");
+            empty_message(frame, area, "courses");
         }
         return;
     }
@@ -1356,7 +1334,7 @@ fn draw_assignments(
     }
     let rows = app.visible_rows();
     if rows.is_empty() {
-        empty_message(frame, area, &app.view().filter, "assignments");
+        empty_message(frame, area, "assignments");
         return;
     }
     let (start, end) = window(app, rows.len(), usize::from(area.height.saturating_sub(1)));
@@ -1441,7 +1419,7 @@ fn draw_announcements(
     }
     let rows = app.visible_rows();
     if rows.is_empty() {
-        empty_message(frame, area, &app.view().filter, "announcements");
+        empty_message(frame, area, "announcements");
         return;
     }
     let (start, end) = window(app, rows.len(), usize::from(area.height.saturating_sub(1)));
@@ -1543,7 +1521,7 @@ fn draw_modules(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, n
     }
     let rows = app.visible_rows();
     if rows.is_empty() {
-        empty_message(frame, area, &app.view().filter, "modules");
+        empty_message(frame, area, "modules");
         return;
     }
     let (start, end) = window(app, rows.len(), usize::from(area.height.saturating_sub(1)));
@@ -1644,7 +1622,7 @@ fn draw_page_list(
     }
     let rows = app.visible_rows();
     if rows.is_empty() {
-        empty_message(frame, area, &app.view().filter, "pages");
+        empty_message(frame, area, "pages");
         return;
     }
     let (start, end) = window(app, rows.len(), usize::from(area.height.saturating_sub(1)));
@@ -1745,7 +1723,7 @@ fn draw_grades(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, no
             .get(course_id)
             .and_then(|r| r.data.as_ref())
             .is_some_and(|g| g.is_empty());
-        if bare && app.view().filter.is_empty() {
+        if bare {
             frame.render_widget(
                 Paragraph::new("This course has no graded work.")
                     .style(theme::muted())
@@ -1757,7 +1735,7 @@ fn draw_grades(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, no
                 },
             );
         } else {
-            empty_message(frame, body, &app.view().filter, "graded work");
+            empty_message(frame, body, "graded work");
         }
         return;
     }
@@ -1939,22 +1917,11 @@ fn draw_files(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, now
     }
     let count = app.file_rows().len();
     if count == 0 {
-        let filter = app.view().filter.clone();
-        empty_message(
-            frame,
-            area,
-            &filter,
-            if filter.is_empty() {
-                "files in this folder"
-            } else {
-                "files"
-            },
-        );
+        empty_message(frame, area, "files in this folder");
         return;
     }
     let (start, end) = window(app, count, usize::from(area.height.saturating_sub(1)));
     let selected = app.view().selected;
-    let searching = !app.view().filter.is_empty();
     let rows = app.file_rows();
     let built: Vec<Row> = rows[start..end]
         .iter()
@@ -1973,25 +1940,9 @@ fn draw_files(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, now
                 }
                 FileRow::File(f) => {
                     let (state, style) = local_text(&app.local_state(f));
-                    let mut name = Vec::new();
-                    if searching
-                        && let Some(path) = f
-                            .folder_id
-                            .as_deref()
-                            .and_then(|id| app.folder(course_id, id))
-                            .and_then(|d| d.full_name.as_deref())
-                            .map(|full| full.split('/').skip(1).collect::<Vec<_>>().join(" / "))
-                            .filter(|p| !p.is_empty())
-                    {
-                        name.push(Span::styled(
-                            format!("{} / ", html::sanitize(&path)),
-                            theme::faint(),
-                        ));
-                    }
-                    name.push(Span::raw(html::sanitize(f.name())));
                     vec![
                         Cell::from(f.kind()).style(theme::code()),
-                        Cell::from(Line::from(name)),
+                        Cell::from(html::sanitize(f.name())),
                         Cell::from(f.size.map(human_size).unwrap_or_default())
                             .style(theme::muted()),
                         Cell::from(
@@ -2039,11 +1990,7 @@ fn draw_files(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, now
     };
     let header = Row::new(vec![
         "",
-        if searching {
-            "Name (whole course)"
-        } else {
-            "Name"
-        },
+        "Name",
         "Size",
         "Updated",
         "On this PC",
@@ -3128,6 +3075,96 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
+/// The title of a result, with the characters the query matched underlined,
+/// so it is clear why a result is in the list at all.
+fn marked_title(title: &str, marks: &[usize], width: usize) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut lit = false;
+    for (i, c) in title.chars().take(width).enumerate() {
+        let now = marks.contains(&i);
+        if now != lit && !run.is_empty() {
+            let style = if lit { theme::accent() } else { Style::new() };
+            spans.push(Span::styled(std::mem::take(&mut run), style));
+        }
+        lit = now;
+        run.push(c);
+    }
+    if !run.is_empty() {
+        let style = if lit { theme::accent() } else { Style::new() };
+        spans.push(Span::styled(run, style));
+    }
+    spans
+}
+
+/// `/` or `Ctrl+K`: one box over whatever is on screen, finding anything the
+/// reader knows about.
+fn draw_palette(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(palette) = &app.palette else {
+        return;
+    };
+    let hits = app.palette_hits();
+    let rect = centered(area, 76, (hits.len() as u16 + 5).min(area.height));
+    let inner_width = usize::from(rect.width.saturating_sub(4));
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("search ", theme::faint()),
+            Span::styled(palette.query.clone(), theme::bold()),
+            Span::styled("▏", theme::key()),
+        ]),
+        Line::styled(format!("  {}", app.palette_coverage()), theme::faint()),
+    ];
+    let mut selected_line = 0;
+    // The badge column is as wide as the longest word, so the titles line up.
+    let badge_width = 6;
+    for (i, hit) in hits.iter().enumerate() {
+        let title_width = inner_width.saturating_sub(badge_width + 3);
+        let mut spans = vec![Span::styled(
+            format!("{:<badge_width$} ", hit.kind.label()),
+            theme::muted(),
+        )];
+        spans.extend(marked_title(&hit.title, &hit.marks, title_width));
+        if !hit.context.is_empty() {
+            let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+            let room = inner_width.saturating_sub(used + 2);
+            if room >= 4 {
+                spans.push(Span::styled(
+                    format!("  {}", truncate(&hit.context, room)),
+                    theme::faint(),
+                ));
+            }
+        }
+        let mut line = Line::from(spans);
+        if i == palette.selected {
+            line = line.style(theme::selected());
+            selected_line = lines.len();
+        }
+        lines.push(line);
+    }
+    if hits.is_empty() {
+        lines.push(Line::styled(
+            if palette.query.is_empty() {
+                "  Type to search"
+            } else {
+                "  Nothing matches"
+            },
+            theme::muted(),
+        ));
+    }
+    let inner_height = usize::from(rect.height.saturating_sub(2));
+    let skip = (selected_line + 1).saturating_sub(inner_height);
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>()).block(
+            ratatui::widgets::Block::bordered()
+                .title(" Search ")
+                .border_style(theme::accent())
+                .padding(ratatui::widgets::Padding::horizontal(1)),
+        ),
+        rect,
+    );
+}
+
 /// The actions menu: what can be done with the selection and on this screen,
 /// each with the letter that runs it.
 fn draw_menu(frame: &mut Frame, area: Rect, app: &App) {
@@ -3423,6 +3460,92 @@ mod tests {
         app.update(Msg::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(screen(&mut app, 90, 14).contains("Only course"));
         assert!(app.hidden_courses.is_empty());
+    }
+
+    #[test]
+    fn the_search_palette_draws_the_box_the_kinds_and_what_it_has_read() {
+        let mut app = App::new("https://ufl.instructure.com", None);
+        let effects = app.start();
+        deliver(
+            &mut app,
+            effects,
+            Payload::Courses(vec![
+                Course {
+                    id: "1".into(),
+                    name: Some("GPU Computing".into()),
+                    ..Default::default()
+                },
+                Course {
+                    id: "2".into(),
+                    name: Some("Compilers".into()),
+                    ..Default::default()
+                },
+            ]),
+        );
+        let send = |app: &mut App, code: KeyCode| {
+            app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+        };
+        send(&mut app, KeyCode::Char('/'));
+        let empty = screen(&mut app, 90, 24);
+        println!("{empty}\n");
+        assert!(empty.contains("Search"), "the box is titled:\n{empty}");
+        assert!(
+            empty.contains("of 2 courses"),
+            "it admits how much it has read:\n{empty}"
+        );
+        assert!(
+            empty.contains("course"),
+            "and lists what it already has:\n{empty}"
+        );
+        for c in "comp".chars() {
+            send(&mut app, KeyCode::Char(c));
+        }
+        let narrowed = screen(&mut app, 90, 24);
+        println!("{narrowed}\n");
+        assert!(
+            narrowed.contains("comp"),
+            "the query is shown:\n{narrowed}"
+        );
+        assert!(
+            narrowed.contains("Compilers"),
+            "the best match is there:\n{narrowed}"
+        );
+        // Nothing matching says so rather than drawing an empty box.
+        for c in "zzz".chars() {
+            send(&mut app, KeyCode::Char(c));
+        }
+        let none = screen(&mut app, 90, 24);
+        assert!(none.contains("Nothing matches"), "{none}");
+    }
+
+    #[test]
+    fn the_palette_fits_a_narrow_terminal() {
+        let mut app = App::new("https://ufl.instructure.com", None);
+        let effects = app.start();
+        deliver(
+            &mut app,
+            effects,
+            Payload::Courses(vec![Course {
+                id: "1".into(),
+                name: Some("A course with a rather long name indeed".into()),
+                ..Default::default()
+            }]),
+        );
+        app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('/'),
+            KeyModifiers::NONE,
+        )));
+        // Half the usual width: the box must still be drawn inside it, with
+        // no line running past the edge.
+        let narrow = screen(&mut app, 46, 14);
+        println!("{narrow}\n");
+        assert!(narrow.contains("Search"));
+        for line in narrow.lines() {
+            assert!(
+                line.chars().count() <= 46,
+                "line runs off the screen: {line:?}"
+            );
+        }
     }
 
     #[test]

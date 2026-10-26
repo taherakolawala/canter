@@ -452,6 +452,22 @@ pub enum FeedbackEntry {
     Criterion(usize),
 }
 
+/// The most results the palette shows at once. More than a screenful is
+/// noise: the ranking is supposed to put the answer near the top.
+pub const PALETTE_RESULTS: usize = 40;
+
+/// How many warm-up reads may be in flight. The executor runs four requests
+/// at a time, so this leaves half the capacity for the screen in front of the
+/// user.
+const WARM_AT_ONCE: usize = 2;
+
+/// The search palette: one box that finds anything the reader knows about.
+#[derive(Clone, Debug, Default)]
+pub struct PaletteState {
+    pub query: String,
+    pub selected: usize,
+}
+
 /// The actions menu (`Space`).
 #[derive(Clone, Debug, Default)]
 pub struct MenuState {
@@ -616,8 +632,6 @@ pub struct View {
     pub kind: ViewKind,
     pub selected: usize,
     pub offset: usize,
-    pub filter: String,
-    pub filtering: bool,
     pub scroll: usize,
     /// Focused section on a page.
     pub focus: Section,
@@ -637,8 +651,6 @@ impl View {
             kind,
             selected: 0,
             offset: 0,
-            filter: String::new(),
-            filtering: false,
             scroll: 0,
             focus: Section::Text,
             link: 0,
@@ -748,6 +760,22 @@ pub struct App {
     pub library: Option<Arc<Library>>,
     pub submission: Option<SubmissionDraft>,
     pub menu: Option<MenuState>,
+    /// The search palette, while it is open.
+    pub palette: Option<PaletteState>,
+    /// Lists the palette still wants, read a couple at a time in the
+    /// background so that searching can find a course never opened.
+    pub warm_queue: std::collections::VecDeque<ResourceKey>,
+    /// Warm-up reads in flight, and which keys they are.
+    warm_running: usize,
+    warm_keys: Vec<ResourceKey>,
+    /// The warm-up is queued once per run.
+    warmed: bool,
+    /// Whether to warm the palette's index at all.
+    ///
+    /// Off unless the reader is being driven by a person: it is the one place
+    /// requests are made that nobody asked for, so the headless walk-through,
+    /// the benchmark and the tests leave it alone and say what they fetch.
+    pub warm_up: bool,
     /// The help screen, with its scroll position.
     pub help: Option<usize>,
     /// Course tabs Canvas shows; read once per run (and on `r`).
@@ -777,10 +805,6 @@ pub struct App {
     pub inbox_item: usize,
     /// A message being written, if any.
     pub message: Option<MessageDraft>,
-}
-
-fn matches_filter(text: &str, filter: &str) -> bool {
-    filter.is_empty() || text.to_lowercase().contains(&filter.to_lowercase())
 }
 
 /// `91.5%`, `88%`: a Canvas score, without a trailing `.0`.
@@ -886,6 +910,12 @@ impl App {
             library: None,
             submission: None,
             menu: None,
+            palette: None,
+            warm_queue: std::collections::VecDeque::new(),
+            warm_running: 0,
+            warm_keys: Vec::new(),
+            warmed: false,
+            warm_up: false,
             help: None,
             tabs: HashMap::new(),
             tabs_read: std::collections::HashSet::new(),
@@ -1424,6 +1454,7 @@ impl App {
                         r.version += 1;
                         self.clamp_selection();
                         effects.extend(self.read_course_grades());
+                        effects.extend(self.start_warm_up());
                     }
                     (Payload::Announcements(list), ResourceKey::Announcements(c)) => {
                         let r = self.announcements.entry(c.clone()).or_default();
@@ -1509,6 +1540,7 @@ impl App {
                         r.sync = SyncState::Idle;
                         r.version += 1;
                         effects.extend(self.follow_tabs());
+                        self.warm_tabs(c);
                     }
                     (Payload::Pages(list), ResourceKey::Pages(c)) => {
                         let r = self.page_lists.entry(c.clone()).or_default();
@@ -1568,6 +1600,7 @@ impl App {
                 self.clamp_selection();
                 self.mark_current_announcement_read();
                 self.mark_current_conversation_read();
+                effects.extend(self.warm_done(&key));
                 effects
             }
             Err(error) => {
@@ -1606,6 +1639,9 @@ impl App {
                         effects.push(Effect::Login);
                     }
                 }
+                // A list the warm-up could not read is simply missing from
+                // the search; the queue carries on without it.
+                effects.extend(self.warm_done(&key));
                 effects
             }
         }
@@ -1615,6 +1651,8 @@ impl App {
     pub fn visible_rows(&self) -> Vec<usize> {
         let view = self.view();
         match &view.kind {
+            // Hidden courses are the only rows a list leaves out now; the
+            // search palette replaced narrowing a list in place.
             ViewKind::Courses => self
                 .courses
                 .data
@@ -1623,31 +1661,19 @@ impl App {
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| self.show_hidden || !self.hidden_courses.contains(&c.id))
-                .filter(|(_, c)| {
-                    matches_filter(c.title(), &view.filter)
-                        || matches_filter(c.course_code.as_deref().unwrap_or(""), &view.filter)
-                })
                 .map(|(i, _)| i)
                 .collect(),
-            ViewKind::Announcements { course_id, .. } => self
+            ViewKind::Announcements { course_id, .. } => (0..self
                 .announcements
                 .get(course_id)
                 .and_then(|r| r.data.as_deref())
-                .unwrap_or(&[])
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| matches_filter(a.title(), &view.filter))
-                .map(|(i, _)| i)
+                .map_or(0, |list| list.len()))
                 .collect(),
-            ViewKind::Assignments { course_id, .. } => self
+            ViewKind::Assignments { course_id, .. } => (0..self
                 .assignments
                 .get(course_id)
                 .and_then(|r| r.data.as_deref())
-                .unwrap_or(&[])
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| matches_filter(a.title(), &view.filter))
-                .map(|(i, _)| i)
+                .map_or(0, |list| list.len()))
                 .collect(),
             ViewKind::Detail { .. }
             | ViewKind::Announcement { .. }
@@ -1655,17 +1681,13 @@ impl App {
             | ViewKind::CourseHome { .. }
             | ViewKind::Conversation { .. } => vec![],
             ViewKind::Files { .. } => (0..self.file_rows().len()).collect(),
-            ViewKind::Modules { course_id, .. } => self.visible_modules(course_id, &view.filter),
-            ViewKind::Grades { course_id, .. } => self.visible_grades(course_id, &view.filter),
-            ViewKind::Pages { course_id, .. } => self
+            ViewKind::Modules { course_id, .. } => self.visible_modules(course_id),
+            ViewKind::Grades { course_id, .. } => self.visible_grades(course_id),
+            ViewKind::Pages { course_id, .. } => (0..self
                 .page_lists
                 .get(course_id)
                 .and_then(|r| r.data.as_deref())
-                .unwrap_or(&[])
-                .iter()
-                .enumerate()
-                .filter(|(_, p)| matches_filter(p.title(), &view.filter))
-                .map(|(i, _)| i)
+                .map_or(0, |list| list.len()))
                 .collect(),
         }
     }
@@ -1736,7 +1758,7 @@ impl App {
 
     /// Module rows matching a search: matching items under their module's
     /// heading, or a whole module whose name matches.
-    fn visible_modules(&self, course_id: &str, filter: &str) -> Vec<usize> {
+    fn visible_modules(&self, course_id: &str) -> Vec<usize> {
         let modules = self
             .modules
             .get(course_id)
@@ -1745,19 +1767,8 @@ impl App {
         let mut out = Vec::new();
         let mut at = 0;
         for m in modules {
-            let head = at;
-            let whole = matches_filter(m.name(), filter);
-            let hits: Vec<usize> = m
-                .items()
-                .iter()
-                .enumerate()
-                .filter(|(_, i)| whole || matches_filter(i.title(), filter))
-                .map(|(k, _)| head + 1 + k)
-                .collect();
-            if whole || !hits.is_empty() {
-                out.push(head);
-                out.extend(hits);
-            }
+            out.push(at);
+            out.extend((0..m.items().len()).map(|k| at + 1 + k));
             at += 1 + m.items().len();
         }
         out
@@ -1791,7 +1802,7 @@ impl App {
 
     /// Grade rows matching a search: matching assignments under their group's
     /// heading, or a whole group whose name matches.
-    fn visible_grades(&self, course_id: &str, filter: &str) -> Vec<usize> {
+    fn visible_grades(&self, course_id: &str) -> Vec<usize> {
         let groups = self
             .grades
             .get(course_id)
@@ -1801,19 +1812,8 @@ impl App {
         let mut out = Vec::new();
         let mut at = 0;
         for g in groups {
-            let head = at;
-            let whole = matches_filter(g.name(), filter);
-            let hits: Vec<usize> = g
-                .assignments
-                .iter()
-                .enumerate()
-                .filter(|(_, a)| whole || matches_filter(a.title(), filter))
-                .map(|(k, _)| head + 1 + k)
-                .collect();
-            if whole || !hits.is_empty() {
-                out.push(head);
-                out.extend(hits);
-            }
+            out.push(at);
+            out.extend((0..g.assignments.len()).map(|k| at + 1 + k));
             at += 1 + g.assignments.len();
         }
         out
@@ -2256,14 +2256,6 @@ impl App {
         let Some(files) = data.files.as_ref() else {
             return vec![];
         };
-        if !view.filter.is_empty() {
-            let mut found: Vec<&CanvasFile> = files
-                .iter()
-                .filter(|f| matches_filter(f.name(), &view.filter))
-                .collect();
-            found.sort_by_cached_key(|f| f.name().to_lowercase());
-            return found.into_iter().map(FileRow::File).collect();
-        }
         let here = folder_id
             .clone()
             .or_else(|| Self::root_folder(data).map(|f| f.id.clone()));
@@ -2859,6 +2851,9 @@ impl App {
                 Scope::Menu
             }];
         }
+        if self.palette.is_some() {
+            return vec![Scope::Palette];
+        }
         self.screen_scopes()
     }
 
@@ -2885,9 +2880,6 @@ impl App {
             };
         }
         let view = self.view();
-        if view.filtering {
-            return vec![Scope::Filter];
-        }
         let mut scopes = vec![Scope::Screen];
         if self.login_required {
             scopes.push(Scope::SignedOut);
@@ -3124,7 +3116,7 @@ impl App {
             || self.menu.is_some()
             || self.submission.is_some()
             || self.message.is_some()
-            || self.view().filtering
+            || self.palette.is_some()
         {
             return true;
         }
@@ -3373,6 +3365,19 @@ impl App {
             _ => None,
         };
         let erase = key.code == KeyCode::Backspace;
+        if let Some(palette) = &mut self.palette {
+            if erase {
+                palette.query.pop();
+            } else if let Some(c) = typed
+                && palette.query.chars().count() < 60
+            {
+                palette.query.push(c);
+            }
+            // Any change to the query reorders everything, so the selection
+            // goes back to the top rather than to whatever is now there.
+            palette.selected = 0;
+            return;
+        }
         if let Some(menu) = &mut self.menu {
             let search = menu.search.get_or_insert_with(String::new);
             if erase {
@@ -3425,18 +3430,7 @@ impl App {
             }
             return;
         }
-        let view = self.view_mut();
-        if erase {
-            view.filter.pop();
-        } else if let Some(c) = typed
-            && view.filter.chars().count() < 64
-        {
-            view.filter.push(c);
-        } else {
-            return;
-        }
-        view.selected = 0;
-        self.clamp_selection();
+
     }
 
     /// Carry out an action.
@@ -3453,8 +3447,8 @@ impl App {
         if self.message.is_some() {
             return self.message_act(act);
         }
-        if self.view().filtering {
-            return self.filter_act(act);
+        if self.palette.is_some() {
+            return self.palette_act(act);
         }
         let page = self.view().kind.page();
         match act {
@@ -3492,12 +3486,8 @@ impl App {
                     vec![]
                 }
             }
-            Act::Search => {
-                if self.is_list() {
-                    self.view_mut().filtering = true;
-                }
-                vec![]
-            }
+            // Only the actions menu searches itself; `/` opens the palette.
+            Act::Search => vec![],
             Act::Refresh => self.refresh(),
             Act::Browser => self
                 .browser_url()
@@ -3508,6 +3498,7 @@ impl App {
                 self.menu = Some(MenuState::default());
                 vec![]
             }
+            Act::Palette => self.open_palette(),
             Act::Help => {
                 self.help = Some(0);
                 vec![]
@@ -3587,6 +3578,387 @@ impl App {
         vec![]
     }
 
+    /// Queue every list the palette wants, once per run.
+    ///
+    /// Searching can only find what has been read, and nothing reads a course
+    /// you never open, so the lists are fetched in the background when the
+    /// course list arrives. This is the one place the reader asks Canvas for
+    /// something the user did not ask for, which is why it is bounded: each
+    /// list once per run, nothing re-read, and the queue is dropped on logout
+    /// with everything else.
+    ///
+    /// Pages and Files are not queued here. Whether a course has them is in
+    /// its tab list, which is itself being read; `warm_tabs` adds them when
+    /// the answer arrives, so no course is asked for a tab it does not show.
+    fn start_warm_up(&mut self) -> Vec<Effect> {
+        if !self.warm_up || self.warmed {
+            return vec![];
+        }
+        self.warmed = true;
+        let courses: Vec<String> = self
+            .courses
+            .data
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        // Hidden courses are searched too: hiding one tidies the list, it does
+        // not say to forget the course.
+        for id in &courses {
+            self.warm_queue
+                .push_back(ResourceKey::Assignments(id.clone()));
+            self.warm_queue
+                .push_back(ResourceKey::Announcements(id.clone()));
+            self.warm_queue.push_back(ResourceKey::Tabs(id.clone()));
+        }
+        for folder in crate::inbox::Folder::ALL {
+            self.warm_queue
+                .push_back(ResourceKey::Conversations(folder.id().into()));
+        }
+        self.warm_next()
+    }
+
+    /// Add a course's pages and files once its tab list says it has them.
+    fn warm_tabs(&mut self, course_id: &str) {
+        if !self.warmed {
+            return;
+        }
+        for tab in self.course_tabs(course_id) {
+            let key = match tab {
+                CourseTab::Pages => ResourceKey::Pages(course_id.to_string()),
+                CourseTab::Files => ResourceKey::Files(course_id.to_string()),
+                _ => continue,
+            };
+            if !self.warm_queue.contains(&key) {
+                self.warm_queue.push_back(key);
+            }
+        }
+    }
+
+    /// Start as many queued reads as the warm-up is allowed at once.
+    ///
+    /// The cap is what keeps this out of the way: the executor runs four
+    /// requests at a time, so holding the warm-up to two leaves half the
+    /// capacity for the screen the user is actually on. Without it, opening a
+    /// course would queue behind fifty reads nobody asked for.
+    fn warm_next(&mut self) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        while self.warm_running < WARM_AT_ONCE {
+            let Some(key) = self.warm_queue.pop_front() else {
+                break;
+            };
+            // Already read, or being read for the screen in front of us.
+            if self.has_data(&key) || matches!(self.sync_of(&key), Some(SyncState::Syncing { .. }))
+            {
+                continue;
+            }
+            self.load_snapshot(&key);
+            if self.has_data(&key) {
+                // A saved copy is enough to search; leave Canvas alone.
+                continue;
+            }
+            if let Some(effect) = self.request(key.clone(), false) {
+                self.warm_running += 1;
+                self.warm_keys.push(key);
+                effects.push(effect);
+            }
+        }
+        effects
+    }
+
+    /// A warm-up read finished (or failed): free its slot and start the next.
+    fn warm_done(&mut self, key: &ResourceKey) -> Vec<Effect> {
+        if let Some(at) = self.warm_keys.iter().position(|k| k == key) {
+            self.warm_keys.remove(at);
+            self.warm_running = self.warm_running.saturating_sub(1);
+            return self.warm_next();
+        }
+        vec![]
+    }
+
+    /// Whether a resource already has something to search.
+    fn has_data(&self, key: &ResourceKey) -> bool {
+        match key {
+            ResourceKey::Assignments(c) => self.assignments.get(c).is_some_and(|r| r.data.is_some()),
+            ResourceKey::Announcements(c) => {
+                self.announcements.get(c).is_some_and(|r| r.data.is_some())
+            }
+            ResourceKey::Tabs(c) => self.tabs.get(c).is_some_and(|r| r.data.is_some()),
+            ResourceKey::Pages(c) => self.page_lists.get(c).is_some_and(|r| r.data.is_some()),
+            ResourceKey::Files(c) => {
+                self.course_files.get(c).is_some_and(|r| r.data.is_some())
+            }
+            ResourceKey::Conversations(f) => {
+                self.conversations.get(f).is_some_and(|r| r.data.is_some())
+            }
+            _ => false,
+        }
+    }
+
+    /// Open the search palette, empty, with the first result selected.
+    fn open_palette(&mut self) -> Vec<Effect> {
+        self.palette = Some(PaletteState {
+            query: String::new(),
+            selected: 0,
+        });
+        self.dirty = true;
+        // Nothing is read here: the palette shows what the warm-up has
+        // already brought in, and says on screen how much that is.
+        vec![]
+    }
+
+    /// Everything the palette could offer, before the query narrows it.
+    ///
+    /// Only what is already in hand: no reads happen while searching. The
+    /// warm-up fills this in the background once per run, and the palette
+    /// says how much of it has arrived, so a short list is never mistaken
+    /// for an empty account.
+    fn palette_pool(&self) -> Vec<crate::search::Hit> {
+        use crate::search::{Hit, Kind, Target};
+        let mut pool: Vec<Hit> = Vec::new();
+        for course in self.courses.data.as_deref().unwrap_or(&[]) {
+            let hidden = self.hidden_courses.contains(&course.id);
+            let context = match (hidden, course.term.as_ref().and_then(|t| t.name.as_deref())) {
+                (true, _) => "hidden".to_string(),
+                (false, Some(term)) => term.to_string(),
+                (false, None) => String::new(),
+            };
+            pool.push(Hit::new(
+                Kind::Course,
+                course.title(),
+                context,
+                Target::Course(course.id.clone()),
+            ));
+        }
+        for (course_id, resource) in &self.assignments {
+            let course = self.course_title(course_id);
+            for item in resource.data.as_deref().unwrap_or(&[]) {
+                pool.push(Hit::new(
+                    Kind::Assignment,
+                    item.title(),
+                    &course,
+                    Target::Assignment(course_id.clone(), item.id.clone()),
+                ));
+            }
+        }
+        for (course_id, resource) in &self.announcements {
+            let course = self.course_title(course_id);
+            for item in resource.data.as_deref().unwrap_or(&[]) {
+                pool.push(Hit::new(
+                    Kind::Announcement,
+                    item.title(),
+                    &course,
+                    Target::Announcement(course_id.clone(), item.id.clone()),
+                ));
+            }
+        }
+        for (course_id, resource) in &self.page_lists {
+            let course = self.course_title(course_id);
+            for page in resource.data.as_deref().unwrap_or(&[]) {
+                let Some(slug) = page.slug() else {
+                    continue;
+                };
+                pool.push(Hit::new(
+                    Kind::Page,
+                    page.title(),
+                    &course,
+                    Target::Page(course_id.clone(), slug.to_string()),
+                ));
+            }
+        }
+        for (course_id, resource) in &self.course_files {
+            let course = self.course_title(course_id);
+            let files = resource.data.as_ref().and_then(|d| d.files.as_deref());
+            for file in files.unwrap_or(&[]) {
+                pool.push(Hit::new(
+                    Kind::File,
+                    file.name(),
+                    &course,
+                    Target::File(course_id.clone(), file.id.clone()),
+                ));
+            }
+        }
+        // One conversation can sit in several folders, so show it once.
+        let mut seen: Vec<&str> = Vec::new();
+        for resource in self.conversations.values() {
+            for item in resource.data.as_deref().unwrap_or(&[]) {
+                if seen.contains(&item.id.as_str()) {
+                    continue;
+                }
+                seen.push(&item.id);
+                pool.push(Hit::new(
+                    Kind::Conversation,
+                    item.subject(),
+                    item.who(),
+                    Target::Conversation(item.id.clone()),
+                ));
+            }
+        }
+        let scopes = self.screen_scopes();
+        for binding in keys::menu(&scopes, &|a| self.screen_available(a)) {
+            pool.push(Hit::new(
+                Kind::Action,
+                self.title_of(binding),
+                // The badge already says this is an action.
+                "",
+                Target::Action(binding.act),
+            ));
+        }
+        pool
+    }
+
+    /// The results to draw, best first.
+    pub fn palette_hits(&self) -> Vec<crate::search::Hit> {
+        let query = self
+            .palette
+            .as_ref()
+            .map(|p| p.query.as_str())
+            .unwrap_or_default();
+        crate::search::rank(query, self.palette_pool(), PALETTE_RESULTS)
+    }
+
+    /// What the palette says under the box about how much it can see.
+    ///
+    /// A search that cannot find a course is confusing unless it admits it
+    /// has not read everything yet, so the count stays on screen.
+    pub fn palette_coverage(&self) -> String {
+        let courses = self.courses.data.as_deref().unwrap_or(&[]).len();
+        let read = self
+            .assignments
+            .values()
+            .filter(|r| r.data.is_some())
+            .count();
+        if self.warm_queue.is_empty() && read >= courses {
+            format!("searching everything in {courses} courses")
+        } else {
+            format!("searching {read} of {courses} courses, still reading")
+        }
+    }
+
+    fn palette_act(&mut self, act: Act) -> Vec<Effect> {
+        let count = self.palette_hits().len();
+        let Some(palette) = self.palette.as_mut() else {
+            return vec![];
+        };
+        match act {
+            Act::Up => palette.selected = palette.selected.saturating_sub(1),
+            Act::Down => palette.selected = (palette.selected + 1).min(count.saturating_sub(1)),
+            Act::InputClear => {
+                palette.query.clear();
+                palette.selected = 0;
+            }
+            Act::InputCancel | Act::Palette => self.palette = None,
+            Act::Open => {
+                let selected = palette.selected;
+                let Some(hit) = self.palette_hits().into_iter().nth(selected) else {
+                    return vec![];
+                };
+                self.palette = None;
+                self.dirty = true;
+                return self.open_hit(hit.target);
+            }
+            _ => {}
+        }
+        self.dirty = true;
+        vec![]
+    }
+
+    /// Go where a result points. It opens on top of wherever the search was
+    /// opened from, so Esc comes back to where you were.
+    fn open_hit(&mut self, target: crate::search::Target) -> Vec<Effect> {
+        use crate::search::Target;
+        let next = match target {
+            Target::Action(act) => {
+                let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+                return self.perform(act, &enter);
+            }
+            Target::Course(id) => {
+                let title = self.course_title(&id);
+                // Open where the saved tabs say, before Canvas is asked again.
+                self.load_snapshot(&ResourceKey::Tabs(id.clone()));
+                self.course_view(&id, &title)
+            }
+            Target::Assignment(course_id, assignment_id) => {
+                let title = self
+                    .assignments
+                    .get(&course_id)
+                    .and_then(|r| r.data.as_ref())
+                    .and_then(|list| list.iter().find(|a| a.id == assignment_id))
+                    .map(|a| a.title().to_string())
+                    .unwrap_or_default();
+                ViewKind::Detail {
+                    course_name: self.course_title(&course_id),
+                    course_id,
+                    assignment_id,
+                    title,
+                }
+            }
+            Target::Announcement(course_id, announcement_id) => {
+                let title = self
+                    .announcements
+                    .get(&course_id)
+                    .and_then(|r| r.data.as_ref())
+                    .and_then(|list| list.iter().find(|a| a.id == announcement_id))
+                    .map(|a| a.title().to_string())
+                    .unwrap_or_default();
+                ViewKind::Announcement {
+                    course_name: self.course_title(&course_id),
+                    course_id,
+                    announcement_id,
+                    title,
+                }
+            }
+            Target::Page(course_id, page_url) => {
+                let title = self
+                    .page_lists
+                    .get(&course_id)
+                    .and_then(|r| r.data.as_ref())
+                    .and_then(|list| list.iter().find(|p| p.slug() == Some(page_url.as_str())))
+                    .map(|p| p.title().to_string())
+                    .unwrap_or_default();
+                ViewKind::WikiPage {
+                    course_name: self.course_title(&course_id),
+                    course_id,
+                    page_url,
+                    title,
+                }
+            }
+            Target::Conversation(conversation_id) => {
+                let subject = self
+                    .conversations
+                    .values()
+                    .filter_map(|r| r.data.as_ref())
+                    .flatten()
+                    .find(|c| c.id == conversation_id)
+                    .map(|c| c.subject().to_string())
+                    .unwrap_or_default();
+                ViewKind::Conversation {
+                    conversation_id,
+                    subject,
+                }
+            }
+            Target::File(course_id, file_id) => {
+                // A file is not a screen. Open the course's Files at the
+                // folder holding it, with it selected, which is where every
+                // other way of reaching a file lands.
+                let folder_id = self
+                    .course_files
+                    .get(&course_id)
+                    .and_then(|r| r.data.as_ref())
+                    .and_then(|d| d.files.as_ref())
+                    .and_then(|files| files.iter().find(|f| f.id == file_id))
+                    .and_then(|f| f.folder_id.clone());
+                ViewKind::Files {
+                    course_name: self.course_title(&course_id),
+                    course_id,
+                    folder_id,
+                }
+            }
+        };
+        self.stack.push(View::new(next));
+        self.enter_current(false)
+    }
     fn menu_act(&mut self, act: Act) -> Vec<Effect> {
         let count = self.menu_entries().len();
         let Some(menu) = self.menu.as_mut() else {
@@ -3614,23 +3986,6 @@ impl App {
                     return self.perform(act, &enter);
                 }
             }
-            _ => {}
-        }
-        vec![]
-    }
-
-    fn filter_act(&mut self, act: Act) -> Vec<Effect> {
-        match act {
-            Act::InputDone => self.view_mut().filtering = false,
-            Act::InputCancel => {
-                let v = self.view_mut();
-                v.filter.clear();
-                v.filtering = false;
-                v.selected = 0;
-                self.clamp_selection();
-            }
-            Act::Up => self.move_selection(-1),
-            Act::Down => self.move_selection(1),
             _ => {}
         }
         vec![]
@@ -3949,15 +4304,8 @@ impl App {
         }
     }
 
-    /// `Esc`: clear a search, leave a section, stop showing hidden courses, or go back.
+    /// `Esc`: leave a section, stop showing hidden courses, or go back.
     fn go_back(&mut self) -> Vec<Effect> {
-        if !self.view().filter.is_empty() {
-            let v = self.view_mut();
-            v.filter.clear();
-            v.selected = 0;
-            self.clamp_selection();
-            return vec![];
-        }
         if self.view().kind == ViewKind::Courses && self.focus() == Section::Day {
             self.view_mut().focus = Section::Calendar;
             return vec![];
@@ -5185,6 +5533,21 @@ mod tests {
         }
     }
 
+    /// `deliver`, but handing back the effects it produced.
+    fn deliver_back(
+        app: &mut App,
+        key: ResourceKey,
+        request: u64,
+        payload: Payload,
+    ) -> Vec<Effect> {
+        app.update(Msg::Fetched {
+            key,
+            request,
+            result: Ok((payload, FetchStats::default())),
+            at: Utc::now(),
+        })
+    }
+
     fn fetch_of(effects: &[Effect]) -> (ResourceKey, u64) {
         match effects.iter().find(|e| matches!(e, Effect::Fetch { .. })) {
             Some(Effect::Fetch { key, request }) => (key.clone(), *request),
@@ -5569,19 +5932,239 @@ mod tests {
         );
     }
 
-    #[test]
-    fn filter_narrows_rows_and_selection_targets_filtered_item() {
-        let mut app = app_with_courses();
-        app.update(key(KeyCode::Char('/')));
-        for c in "comp".chars() {
+    /// Type a query into the open palette.
+    fn type_query(app: &mut App, text: &str) {
+        for c in text.chars() {
             app.update(key(KeyCode::Char(c)));
         }
-        assert_eq!(app.visible_rows(), vec![0, 1]);
-        app.update(key(KeyCode::Char('i')));
-        assert_eq!(app.visible_rows(), vec![1]);
-        app.update(key(KeyCode::Enter));
+    }
+
+    #[test]
+    fn the_palette_opens_on_slash_and_on_ctrl_k() {
+        let mut app = app_with_courses();
+        app.update(key(KeyCode::Char('/')));
+        assert!(app.palette.is_some(), "slash opens it");
+        app.update(key(KeyCode::Esc));
+        assert!(app.palette.is_none(), "Esc closes it");
+        app.update(ctrl('k'));
+        assert!(app.palette.is_some(), "Ctrl+K opens it too");
+    }
+
+    #[test]
+    fn typing_narrows_the_results_and_enter_opens_the_course() {
+        let mut app = app_with_courses();
+        app.update(key(KeyCode::Char('/')));
+        type_query(&mut app, "comp");
+        // Both courses match: "Compilers" by name, "GPU Computing" inside a
+        // word. The named one wins.
+        let hits = app.palette_hits();
+        let courses: Vec<&str> = hits
+            .iter()
+            .filter(|h| h.kind == crate::search::Kind::Course)
+            .map(|h| h.title.as_str())
+            .collect();
+        assert_eq!(courses, ["Compilers", "GPU Computing"]);
         let (k, _) = fetch_of(&app.update(key(KeyCode::Enter)));
         assert_eq!(k, ResourceKey::Assignments("20".into()));
+        assert!(app.palette.is_none(), "opening a result closes the palette");
+    }
+
+    #[test]
+    fn the_selection_goes_back_to_the_top_when_the_query_changes() {
+        // Otherwise the second keystroke opens whatever happens to have
+        // moved under the cursor, which is how a palette loses your trust.
+        let mut app = app_with_courses();
+        app.update(key(KeyCode::Char('/')));
+        app.update(key(KeyCode::Down));
+        assert_eq!(app.palette.as_ref().unwrap().selected, 1);
+        type_query(&mut app, "c");
+        assert_eq!(app.palette.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn the_palette_swallows_keys_that_mean_something_underneath() {
+        // `q` quits and `r` refreshes on the course list; inside the palette
+        // they are just letters.
+        let mut app = app_with_courses();
+        app.update(key(KeyCode::Char('/')));
+        type_query(&mut app, "qr");
+        assert!(!app.quit, "q typed into the box must not quit");
+        assert_eq!(app.palette.as_ref().unwrap().query, "qr");
+    }
+
+    #[test]
+    fn an_action_can_be_run_from_the_palette() {
+        let mut app = app_with_courses();
+        assert!(!app.show_hidden);
+        app.update(key(KeyCode::Char('/')));
+        type_query(&mut app, "hidden");
+        let hit = app
+            .palette_hits()
+            .into_iter()
+            .find(|h| h.kind == crate::search::Kind::Action)
+            .expect("the hidden-courses action is offered");
+        assert_eq!(hit.target, crate::search::Target::Action(Act::ShowHidden));
+        app.update(key(KeyCode::Enter));
+        assert!(app.show_hidden, "the action ran");
+        assert!(app.palette.is_none());
+    }
+
+    #[test]
+    fn the_palette_searches_work_pages_files_and_the_inbox() {
+        let mut app = app_with_courses();
+        let (k, r) = fetch_of(&app.update(key(KeyCode::Enter)));
+        deliver(
+            &mut app,
+            k,
+            r,
+            Payload::Assignments(vec![AssignmentSummary {
+                id: "7".into(),
+                name: Some("Lab 2: Pipelining".into()),
+                ..Default::default()
+            }]),
+        );
+        app.page_lists.entry("10".into()).or_default().data = Some(vec![page_summary("intro", "Welcome", 1)]);
+        app.conversations.entry("inbox".into()).or_default().data =
+            Some(vec![conversation("5", "About your lab", "read")]);
+        app.update(key(KeyCode::Char('/')));
+        type_query(&mut app, "lab");
+        let kinds: Vec<crate::search::Kind> =
+            app.palette_hits().into_iter().map(|h| h.kind).collect();
+        assert!(kinds.contains(&crate::search::Kind::Assignment));
+        assert!(kinds.contains(&crate::search::Kind::Conversation));
+    }
+
+    #[test]
+    fn a_result_opens_on_top_so_escape_comes_back() {
+        let mut app = app_with_courses();
+        let depth = app.stack.len();
+        app.update(key(KeyCode::Char('/')));
+        type_query(&mut app, "compilers");
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.stack.len(), depth + 1, "pushed, not replaced");
+        app.update(key(KeyCode::Esc));
+        assert_eq!(app.stack.len(), depth, "and Esc returns");
+    }
+
+    #[test]
+    fn the_warm_up_reads_every_list_once_a_couple_at_a_time() {
+        let mut app = App::new("https://ufl.instructure.com", None);
+        app.warm_up = true;
+        let (k, r) = fetch_of(&app.start());
+        let effects = deliver_back(
+            &mut app,
+            k,
+            r,
+            Payload::Courses(vec![
+                course("10", "GPU Computing"),
+                course("20", "Compilers"),
+            ]),
+        );
+        // Two at a time, so the screen the user is on keeps half the capacity.
+        let started: Vec<ResourceKey> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Fetch { key, .. } => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            started.len(),
+            WARM_AT_ONCE,
+            "no more than two warm-up reads in flight: {started:?}"
+        );
+        assert!(!app.warm_queue.is_empty(), "the rest is queued");
+        // Each one that finishes starts the next, and nothing is asked twice.
+        let mut asked = started.clone();
+        let mut guard = 0;
+        while let Some(next) = asked.pop() {
+            guard += 1;
+            assert!(guard < 200, "the queue should drain");
+            let request = match app.sync_of(&next) {
+                Some(SyncState::Syncing { request, .. }) => *request,
+                _ => continue,
+            };
+            for effect in deliver_back(&mut app, next, request, Payload::Tabs(vec![])) {
+                if let Effect::Fetch { key, .. } = effect {
+                    assert!(
+                        !asked.contains(&key),
+                        "{key:?} was already being read"
+                    );
+                    asked.insert(0, key);
+                }
+            }
+        }
+        assert!(app.warm_queue.is_empty(), "every list was reached");
+    }
+
+    #[test]
+    fn a_saved_copy_spares_the_warm_up_a_read() {
+        // Why a second run costs almost nothing: the lists are on disk, and
+        // searching a saved copy is better than reading seventeen courses
+        // again to find out they have not changed.
+        let root = std::env::temp_dir().join(format!("tuicanvas-warm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Arc::new(SnapshotStore::new(&root, "reader"));
+        store.save(
+            &ResourceKey::Assignments("10".into()),
+            &vec![AssignmentSummary {
+                id: "7".into(),
+                name: Some("Lab 2".into()),
+                ..Default::default()
+            }],
+            Utc::now(),
+        );
+        let mut app = App::new(ORIGIN, Some(store));
+        app.warm_up = true;
+        let (k, r) = fetch_of(&app.start());
+        let effects = deliver_back(&mut app, k, r, Payload::Courses(vec![course("10", "GPU")]));
+        let asked: Vec<ResourceKey> = effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Fetch { key, .. } => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !asked.contains(&ResourceKey::Assignments("10".into())),
+            "the saved list was enough: {asked:?}"
+        );
+        // And it is searchable straight away.
+        app.update(key(KeyCode::Char('/')));
+        for c in "lab".chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+        assert!(
+            app.palette_hits()
+                .iter()
+                .any(|h| h.title == "Lab 2"),
+            "a saved assignment is searchable without any read"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_warm_up_stays_off_unless_a_person_is_driving() {
+        // The headless walk-through, the benchmark and these tests must say
+        // exactly what they ask Canvas for.
+        let mut app = App::new("https://ufl.instructure.com", None);
+        let (k, r) = fetch_of(&app.start());
+        let effects = deliver_back(&mut app, k, r, Payload::Courses(vec![course("10", "GPU")]));
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Fetch { .. })),
+            "nothing is read that nobody asked for: {effects:?}"
+        );
+        assert!(app.warm_queue.is_empty());
+    }
+
+    #[test]
+    fn the_palette_says_how_much_it_has_read() {
+        let mut app = app_with_courses();
+        assert_eq!(app.palette_coverage(), "searching 0 of 2 courses, still reading");
+        let (k, r) = fetch_of(&app.update(key(KeyCode::Enter)));
+        deliver(&mut app, k, r, Payload::Assignments(vec![]));
+        app.update(key(KeyCode::Esc));
+        assert_eq!(app.palette_coverage(), "searching 1 of 2 courses, still reading");
     }
 
     #[test]
@@ -5749,7 +6332,7 @@ mod tests {
     }
 
     #[test]
-    fn announcements_navigate_filter_refresh_and_ignore_old_responses() {
+    fn announcements_navigate_refresh_and_ignore_old_responses() {
         let mut app = files_app(None);
         let (k, r) = fetch_of(&app.update(key(KeyCode::Tab)));
         assert_eq!(k, ResourceKey::Announcements("10".into()));
@@ -5760,11 +6343,6 @@ mod tests {
         };
         deliver(&mut app, k.clone(), r, Payload::Announcements(vec![a]));
         assert_eq!(app.visible_rows(), [0]);
-        app.update(key(KeyCode::Char('/')));
-        for c in "exam".chars() {
-            app.update(key(KeyCode::Char(c)));
-        }
-        app.update(key(KeyCode::Enter));
         let (detail_key, request) = fetch_of(&app.update(key(KeyCode::Enter)));
         assert_eq!(
             detail_key,
@@ -6383,13 +6961,30 @@ mod tests {
     }
 
     #[test]
-    fn search_in_files_covers_the_whole_course() {
+    fn a_file_is_found_wherever_it_sits_in_the_course() {
+        // The Files screen shows one folder at a time, and typing no longer
+        // flattens it. Reaching a file by name is the palette's job now, so
+        // this checks the capability moved rather than went away.
         let mut app = files_app(None);
+        let here = row_names(&app);
         app.update(key(KeyCode::Char('/')));
         for c in "lecture".chars() {
             app.update(key(KeyCode::Char(c)));
         }
-        assert_eq!(row_names(&app), vec!["lecture1.pdf"]);
+        let found: Vec<String> = app
+            .palette_hits()
+            .into_iter()
+            .filter(|h| h.kind == crate::search::Kind::File)
+            .map(|h| h.title)
+            .collect();
+        assert!(
+            found.iter().any(|n| n == "lecture1.pdf"),
+            "the palette finds it: {found:?}"
+        );
+        assert!(
+            !here.iter().any(|n| *n == "lecture1.pdf"),
+            "and it is not in the folder on screen, so it was really found"
+        );
     }
 
     #[test]
@@ -6980,17 +7575,17 @@ mod tests {
     }
 
     #[test]
-    fn module_search_keeps_headings_of_matching_items() {
-        let mut app = modules_app(&["modules"], None);
-        app.update(key(KeyCode::Char('/')));
-        for c in "quiz".chars() {
-            app.update(key(KeyCode::Char(c)));
-        }
-        assert_eq!(app.visible_rows(), [0, 5]);
-        assert_eq!(app.view().selected, 1);
+    fn every_module_heading_and_item_is_listed() {
+        // Narrowing this list in place is gone; the palette searches the
+        // whole account instead. What is left to check is that the headings
+        // and their items are all here, in order, and that a row still
+        // resolves to the item it draws.
+        let app = modules_app(&["modules"], None);
+        let rows = app.visible_rows();
+        assert_eq!(rows, (0..rows.len()).collect::<Vec<_>>());
         assert!(matches!(
-            app.selected_module_row(),
-            Some(ModuleRow::Item(_, i)) if i.title() == "Quiz 1"
+            app.module_rows("10").first(),
+            Some(ModuleRow::Module(_))
         ));
     }
 
@@ -7154,17 +7749,9 @@ mod tests {
             app.selected_grade_row(),
             Some(GradeRow::Assignment(_, a)) if a.id == "5"
         ));
-        // Search keeps a matching assignment under its group's heading.
-        app.update(key(KeyCode::Char('/')));
-        for c in "midterm".chars() {
-            app.update(key(KeyCode::Char(c)));
-        }
-        app.update(key(KeyCode::Enter));
-        assert_eq!(app.visible_rows(), [3, 4]);
-        assert!(matches!(
-            app.selected_grade_row(),
-            Some(GradeRow::Assignment(_, a)) if a.id == "5"
-        ));
+        // Every heading and every row under it is listed: narrowing a list
+        // in place is gone, and the palette searches instead.
+        assert_eq!(app.visible_rows(), [0, 1, 2, 3, 4]);
     }
 
     #[test]
@@ -7199,13 +7786,10 @@ mod tests {
     #[test]
     fn a_group_heading_cannot_be_opened_and_o_falls_back_to_the_grades_page() {
         let mut app = grades_app(None);
-        // Nothing to open while the search hides every assignment.
-        app.update(key(KeyCode::Char('/')));
-        for c in "nothing".chars() {
-            app.update(key(KeyCode::Char(c)));
-        }
-        app.update(key(KeyCode::Enter));
-        assert!(app.visible_rows().is_empty());
+        // The first row is a group heading. Moving never lands on one, so
+        // put the selection there by hand to check what Enter does with it.
+        app.view_mut().selected = 0;
+        assert!(matches!(app.selected_grade_row(), Some(GradeRow::Group(_))));
         assert!(app.update(key(KeyCode::Enter)).is_empty());
         assert_eq!(
             app.browser_url().unwrap(),
@@ -7324,13 +7908,8 @@ mod tests {
             app.browser_url().unwrap(),
             format!("{ORIGIN}/courses/10/pages/week-2")
         );
-        // Searching by title, then opening, reads that page.
-        app.update(key(KeyCode::Char('/')));
-        for c in "week 1".chars() {
-            app.update(key(KeyCode::Char(c)));
-        }
-        app.update(key(KeyCode::Enter));
-        assert_eq!(app.visible_rows(), [1]);
+        // The row chosen is the page read.
+        app.update(key(KeyCode::Down));
         let effects = app.update(key(KeyCode::Enter));
         assert_eq!(
             fetch_of(&effects).0,

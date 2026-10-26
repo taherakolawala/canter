@@ -666,6 +666,8 @@ pub fn run(config: &Config, options: Options) -> Result<(), String> {
     } = setup(config, &options, true)?;
     let mut app = App::new(&config.origin, Some(executor.store.clone()));
     app.library = Some(executor.library.clone());
+    // Only the interactive reader warms the search index, and only once.
+    app.warm_up = true;
     executor.evict_unused_files();
     let mut terminal =
         ratatui::try_init().map_err(|_| "Could not initialise the terminal.".to_string())?;
@@ -779,6 +781,7 @@ pub fn run(config: &Config, options: Options) -> Result<(), String> {
                                     Arc::new(SnapshotStore::new(&config.cache_root(), &account));
                                 app = App::new(&config.origin, Some(executor.store.clone()));
                                 app.library = Some(executor.library.clone());
+                                app.warm_up = true;
                             }
                             Msg::LoginFinished {
                                 ok: true,
@@ -998,6 +1001,14 @@ pub fn dump(config: &Config, out: &Path, course: &str, assignment: &str) -> Resu
     }
     let effects = app.update(press(KeyCode::Esc));
     step(&mut app, effects, "4-back-to-assignments", &mut timings)?;
+    // The search palette, empty and with a query, over whatever is on screen.
+    app.update(press(KeyCode::Char('/')));
+    step(&mut app, vec![], "4b-search", &mut timings)?;
+    for c in "lab".chars() {
+        app.update(press(KeyCode::Char(c)));
+    }
+    step(&mut app, vec![], "4c-search-lab", &mut timings)?;
+    app.update(press(KeyCode::Esc));
     // Modules, and the first page in them, when Canvas shows Modules.
     while app.stack.len() > 2 {
         app.update(press(KeyCode::Esc));
