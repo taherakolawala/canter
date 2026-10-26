@@ -136,6 +136,10 @@ fn current_has_data(app: &App) -> bool {
             .conversation_details
             .get(conversation_id)
             .is_some_and(|r| r.data.is_some()),
+        ViewKind::Inbox { folder } => app
+            .conversations
+            .get(folder.id())
+            .is_some_and(|r| r.data.is_some()),
     }
 }
 
@@ -227,7 +231,8 @@ fn find_row(app: &App, needle: &str) -> Option<usize> {
             | ViewKind::Announcement { .. }
             | ViewKind::WikiPage { .. }
             | ViewKind::CourseHome { .. }
-            | ViewKind::Conversation { .. } => false,
+            | ViewKind::Conversation { .. }
+            | ViewKind::Inbox { .. } => false,
             ViewKind::Modules { course_id, .. } => {
                 matches!(app.module_rows(course_id).get(i), Some(crate::app::ModuleRow::Item(_, it))
                     if it.title().to_lowercase().contains(&needle))

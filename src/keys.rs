@@ -131,8 +131,11 @@ pub enum Scope {
     Calendar,
     /// The selected day's entries have focus.
     Day,
-    /// The Inbox on the home screen has focus.
+    /// The Inbox screen: the folders and their conversations.
     Inbox,
+    /// The home screen's Inbox box has focus. It shows a count and opens the
+    /// Inbox screen; the folders and conversations are not here.
+    InboxWidget,
     /// An open Inbox conversation.
     Conversation,
     Assignment,
@@ -325,7 +328,19 @@ pub static BINDINGS: &[Binding] = &[
     b(Act::Open, &[ENTER], &[Inbox], "open")
         .title("Open the conversation")
         .hint(2),
-    b(Act::Back, &[ESC, BACKSPACE], &[Inbox], "courses")
+    b(Act::Back, &[ESC, BACKSPACE], &[Inbox], "home")
+        .title("Back to the home screen")
+        .hint(7),
+    b(Act::Open, &[ENTER, RIGHT, ch('l')], &[InboxWidget], "open")
+        .title("Open the Inbox")
+        .hint(1),
+    // The home screen keeps room for more of these boxes, and the arrows are
+    // how they will be moved between. With one box there is nowhere to go,
+    // but the keys have to mean this rather than fall through to the course
+    // list hidden behind the box.
+    b(Act::Up, &[UP, ch('k')], &[InboxWidget], "widget").title("Previous widget"),
+    b(Act::Down, &[DOWN, ch('j')], &[InboxWidget], "widget").title("Next widget"),
+    b(Act::Back, &[ESC, BACKSPACE], &[InboxWidget], "courses")
         .title("Back to the course list")
         .hint(7),
     b(Act::Up, &[UP, ch('k')], &[List, Page, Help], "move").title("Move up"),
@@ -776,7 +791,8 @@ mod tests {
             vec![Screen, List, Courses],
             vec![Screen, Courses, Calendar],
             vec![Screen, Courses, Day],
-            vec![Screen, Courses, Inbox],
+            vec![Screen, Courses, InboxWidget],
+            vec![Screen, Inbox],
             vec![Screen, Page, Sections, Conversation],
             vec![Screen, Page, Sections, Conversation, HasLinks],
             vec![Screen, Page, Sections, Conversation, HasLinks, Links],

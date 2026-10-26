@@ -469,6 +469,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 let page = kind.page().expect("a page view");
                 draw_page(frame, main, app, &page, "Inbox", now)
             }
+            ViewKind::Inbox { .. } => draw_inbox(frame, main, app, now),
             ViewKind::Announcement { course_name, .. }
             | ViewKind::Detail { course_name, .. }
             | ViewKind::WikiPage { course_name, .. } => {
@@ -640,6 +641,14 @@ fn draw_top(frame: &mut Frame, area: Rect, app: &App, now: DateTime<Utc>) {
         } => {
             crumbs.push(course_name.clone());
             sync_text(app.tabs.get(course_id), app.spinner, now)
+        }
+        ViewKind::Inbox { folder } => {
+            crumbs.push("Inbox".into());
+            // The Inbox folder is the Inbox, so naming it twice says nothing.
+            if *folder != crate::inbox::Folder::Inbox {
+                crumbs.push(folder.label().to_string());
+            }
+            sync_text(app.inbox_resource(), app.spinner, now)
         }
         ViewKind::Conversation {
             conversation_id,
@@ -861,34 +870,116 @@ fn draw_home(frame: &mut Frame, area: Rect, app: &mut App, now: DateTime<Utc>) {
         )),
         rule,
     );
-    // The calendar takes the left half; the Inbox takes the right.
-    let [calendar, inbox] =
+    // The calendar keeps the left half. The right half is for widgets: small
+    // boxes in a row, with the space after them deliberately empty so the
+    // next one costs no layout work.
+    let [calendar, widgets] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Fill(1)]).areas(bottom);
     if calendar.height >= 6 {
         draw_month(frame, calendar, app, now);
     }
-    if inbox.height >= 3 && inbox.width >= 24 {
-        draw_inbox(frame, inbox, app, now);
+    if let Some(slot) = widget_slot(widgets, 0) {
+        draw_inbox_widget(frame, slot, app);
     }
 }
 
-/// The Inbox beside the calendar: the folders across the top, the chosen
-/// folder's conversations under them, newest activity first.
-fn draw_inbox(frame: &mut Frame, area: Rect, app: &mut App, now: DateTime<Utc>) {
+/// How wide and tall a home-screen widget is. One size for all of them, so
+/// the next one lines up with this without any more layout code.
+const WIDGET: (u16, u16) = (22, 4);
+
+/// Where the `n`th home-screen widget goes inside the space kept for them.
+///
+/// They flow left to right and then down, which is why the Inbox does not own
+/// its corner: the second widget sits beside it without moving anything.
+fn widget_slot(area: Rect, n: u16) -> Option<Rect> {
+    let (w, h) = WIDGET;
+    let columns = (area.width / (w + 1)).max(1);
+    let (column, row) = (n % columns, n / columns);
+    let x = area.x + column * (w + 1);
+    let y = area.y + row * h;
+    if x + w > area.x + area.width || y + h > area.y + area.height {
+        return None;
+    }
+    Some(Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    })
+}
+
+/// The Inbox as a small box on the home screen: an envelope, the name, and
+/// how many conversations are waiting. The folders and the conversations
+/// themselves are on the Inbox screen, which `Enter` opens.
+fn draw_inbox_widget(frame: &mut Frame, area: Rect, app: &App) {
     let focused = app.focus() == Section::Inbox;
+    let unread = app.unread_conversations();
+    // A count of nothing and a count not yet read look the same, so say
+    // which it is while the first read is still out.
+    let waiting = app
+        .unread_resource()
+        .is_some_and(|r| matches!(r.sync, SyncState::Syncing { .. }) && r.data.is_none());
+    let count = if waiting {
+        "…".to_string()
+    } else {
+        match unread {
+            0 => "all read".to_string(),
+            1 => "1 unread".to_string(),
+            n => format!("{n} unread"),
+        }
+    };
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("\u{2709} ", if unread > 0 { theme::accent() } else { theme::muted() }),
+            Span::styled(
+                "Inbox",
+                if focused {
+                    theme::tab_active()
+                } else {
+                    theme::heading()
+                },
+            ),
+        ]),
+        Line::styled(
+            count,
+            if unread > 0 {
+                theme::bold()
+            } else {
+                theme::muted()
+            },
+        ),
+    ];
+    frame.render_widget(ratatui::widgets::Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            ratatui::widgets::Block::bordered()
+                .border_style(if focused {
+                    theme::accent()
+                } else {
+                    theme::faint()
+                })
+                .padding(ratatui::widgets::Padding::horizontal(1)),
+        ),
+        area,
+    );
+}
+
+/// The Inbox screen: the folders across the top, the chosen folder's
+/// conversations under them, newest activity first.
+fn draw_inbox(frame: &mut Frame, area: Rect, app: &mut App, now: DateTime<Utc>) {
     let current = app.inbox_folder;
     let width = usize::from(area.width);
     let mut spans = vec![Span::styled(" ", theme::faint())];
     for (i, folder) in crate::inbox::Folder::ALL.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(" │ ", theme::faint()));
+            spans.push(Span::styled(" \u{2502} ", theme::faint()));
         }
         spans.push(Span::styled(
             folder.label(),
-            match (*folder == current, focused) {
-                (true, true) => theme::tab_active(),
-                (true, false) => theme::heading(),
-                _ => theme::faint(),
+            if *folder == current {
+                theme::tab_active()
+            } else {
+                theme::faint()
             },
         ));
     }
@@ -906,28 +997,17 @@ fn draw_inbox(frame: &mut Frame, area: Rect, app: &mut App, now: DateTime<Utc>) 
                 (_, 0) => " all read ".to_string(),
                 (_, n) => format!(" {n} unread "),
             },
-            if focused {
-                theme::tab_active()
-            } else {
-                theme::heading()
-            },
+            theme::heading(),
         ),
         Span::styled(state, state_style),
-        Span::styled(
-            if focused {
-                "   ←→ folder"
-            } else {
-                "   Tab to use the Inbox"
-            },
-            theme::faint(),
-        ),
+        Span::styled("   \u{2190}\u{2192} folder", theme::faint()),
     ]));
     let room = usize::from(area.height).saturating_sub(lines.len());
     let rows = app.inbox_rows();
     if rows.is_empty() {
         let text = match app.inbox_resource().map(|r| &r.sync) {
             Some(SyncState::Syncing { .. }) if app.inbox_resource().is_none() => {
-                "Loading…".to_string()
+                "Loading\u{2026}".to_string()
             }
             Some(SyncState::Failed(e)) => format!("   Could not load: {}", e.describe()),
             _ => format!("   Nothing in {}.", current.label()),
@@ -936,7 +1016,7 @@ fn draw_inbox(frame: &mut Frame, area: Rect, app: &mut App, now: DateTime<Utc>) 
         frame.render_widget(Paragraph::new(lines), area);
         return;
     }
-    // Keep the selection in view without scrolling the whole home screen.
+    // Keep the selection in view.
     let start = app.inbox_item.saturating_sub(room.saturating_sub(1));
     for (i, c) in rows.iter().enumerate().skip(start).take(room) {
         let status = app.conversation_status(c);
@@ -946,8 +1026,8 @@ fn draw_inbox(frame: &mut Frame, area: Rect, app: &mut App, now: DateTime<Utc>) 
             .map(|d| short_date(d, now))
             .unwrap_or_else(|| "Unknown date".into());
         let mark = if c.starred == Some(true) { "*" } else { " " };
-        let who = truncate(&html::sanitize(&c.who()), 16);
-        let head = format!(" {mark}{} {who}  ", if unread { "•" } else { " " });
+        let who = truncate(&html::sanitize(&c.who()), 24);
+        let head = format!(" {mark}{} {who}  ", if unread { "\u{2022}" } else { " " });
         let subject = truncate(
             &html::sanitize(c.subject()),
             width.saturating_sub(head.width() + when.width() + 2),
@@ -964,7 +1044,7 @@ fn draw_inbox(frame: &mut Frame, area: Rect, app: &mut App, now: DateTime<Utc>) 
             Span::styled(subject, if unread { theme::bold() } else { theme::text() }),
             Span::styled(format!("  {when}"), theme::faint()),
         ]);
-        if focused && i == app.inbox_item {
+        if i == app.inbox_item {
             line = line.style(theme::selected());
         }
         lines.push(line);
@@ -1671,7 +1751,7 @@ fn draw_page_list(
                 Row::new([
                     "Page",
                     if wide { "Last changed" } else { "" },
-                    if wide { "" } else { "" },
+                    "",
                 ])
                 .style(theme::table_header()),
             )
@@ -3823,9 +3903,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn home_screen_shows_the_inbox_beside_the_calendar_with_its_folders() {
-        let conversation = |id: &str, subject: &str, state: &str, starred| crate::inbox::Summary {
+    fn sample_conversation(id: &str, subject: &str, state: &str, starred: bool) -> crate::inbox::Summary {
+        crate::inbox::Summary {
             id: id.into(),
             subject: Some(subject.into()),
             workflow_state: Some(state.into()),
@@ -3836,15 +3915,73 @@ mod tests {
                 name: Some("Dr Ada".into()),
             }],
             ..Default::default()
-        };
+        }
+    }
+
+    /// Tab to the Inbox box and open it, answering the folder read.
+    fn open_inbox(app: &mut App, rows: Vec<crate::inbox::Summary>) {
+        let press =
+            |app: &mut App, code| app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        press(app, KeyCode::Tab);
+        press(app, KeyCode::Tab);
+        let effects = press(app, KeyCode::Enter);
+        deliver(app, effects, Payload::Conversations(rows));
+    }
+
+    #[test]
+    fn the_home_screen_shows_the_inbox_as_a_small_box_with_a_count() {
         let mut app = home_app(vec![
-            conversation("5", "Lab 3 feedback", "unread", false),
-            conversation("6", "Office hours moved", "read", true),
+            sample_conversation("5", "Lab 3 feedback", "unread", false),
+            sample_conversation("6", "Office hours moved", "unread", true),
         ]);
         let home = screen(&mut app, 112, 30);
         println!("{home}\n");
+        // An envelope, the name, and the count. Not the conversations: that
+        // was the clutter this replaced.
+        assert!(home.contains('\u{2709}'), "an envelope:\n{home}");
+        assert!(home.contains("Inbox"), "{home}");
+        assert!(home.contains("2 unread"), "{home}");
+        assert!(
+            !home.contains("Lab 3 feedback"),
+            "no conversations on the home screen:\n{home}"
+        );
+        assert!(
+            !home.contains("Archived"),
+            "and no folder row either:\n{home}"
+        );
+        // The calendar still has its half.
+        assert!(home.contains("Sun"), "the calendar is untouched:\n{home}");
+        // Tab reaches the box, and the hint says what Enter does.
+        let press =
+            |app: &mut App, code| app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        let focused = screen(&mut app, 112, 30);
+        println!("{focused}\n");
+        assert!(focused.contains("Enter open"), "{focused}");
+    }
+
+    #[test]
+    fn the_box_says_all_read_when_nothing_is_waiting() {
+        let mut app = home_app(vec![]);
+        let home = screen(&mut app, 112, 30);
+        assert!(home.contains("all read"), "{home}");
+        assert!(!home.contains("0 unread"), "not a bare zero:\n{home}");
+    }
+
+    #[test]
+    fn opening_the_box_gives_the_inbox_its_own_screen_with_the_folders() {
+        let mut app = home_app(vec![sample_conversation("9", "Welcome", "read", false)]);
+        open_inbox(
+            &mut app,
+            vec![
+                sample_conversation("5", "Lab 3 feedback", "unread", false),
+                sample_conversation("6", "Office hours moved", "read", true),
+            ],
+        );
+        let inbox = screen(&mut app, 112, 30);
+        println!("{inbox}\n");
         for part in [
-            "GPU Computing",
             "Inbox",
             "Unread",
             "Starred",
@@ -3853,30 +3990,30 @@ mod tests {
             "Lab 3 feedback",
             "Office hours moved",
             "Dr Ada",
-            "Tab to use the Inbox",
+            "\u{2190}\u{2192} folder",
         ] {
-            assert!(home.contains(part), "{part} missing:\n{home}");
+            assert!(inbox.contains(part), "{part} missing:\n{inbox}");
         }
-        // Unread is marked, starred is marked, and Tab gives the Inbox focus.
-        assert!(home.contains('•') && home.contains('*'), "{home}");
-        app.update(Msg::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
-        app.update(Msg::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
-        let focused = screen(&mut app, 112, 30);
-        println!("{focused}\n");
-        assert!(focused.contains("←→ folder"), "{focused}");
-        assert!(focused.contains("Enter open"), "{focused}");
-        // An empty folder says so rather than looking broken.
-        let mut empty = home_app(vec![]);
-        let rendered = screen(&mut empty, 112, 30);
-        assert!(rendered.contains("Nothing in Inbox."), "{rendered}");
+        // Unread is marked, and so is starred.
+        assert!(inbox.contains('\u{2022}') && inbox.contains('*'), "{inbox}");
+        // The course list and the calendar are not on this screen.
+        assert!(!inbox.contains("Sun"), "the calendar is gone:\n{inbox}");
         for (w, h) in [(60, 20), (40, 10), (20, 5), (1, 1)] {
             let _ = screen(&mut app, w, h);
         }
     }
 
     #[test]
+    fn an_empty_folder_says_so_rather_than_looking_broken() {
+        let mut app = home_app(vec![]);
+        open_inbox(&mut app, vec![]);
+        let rendered = screen(&mut app, 112, 30);
+        assert!(rendered.contains("Nothing in Inbox."), "{rendered}");
+    }
+
+    #[test]
     fn a_conversation_reads_as_a_page_with_each_message_and_its_files() {
-        let mut app = home_app(vec![crate::inbox::Summary {
+        let summary = crate::inbox::Summary {
             id: "5".into(),
             subject: Some("Lab 3 feedback".into()),
             workflow_state: Some("unread".into()),
@@ -3888,11 +4025,11 @@ mod tests {
                 name: Some("Dr Ada".into()),
             }],
             ..Default::default()
-        }]);
+        };
+        let mut app = home_app(vec![summary.clone()]);
+        open_inbox(&mut app, vec![summary]);
         let press =
             |app: &mut App, code| app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
-        press(&mut app, KeyCode::Tab);
-        press(&mut app, KeyCode::Tab);
         let effects = press(&mut app, KeyCode::Enter);
         let message = |id: &str, body: &str, when: &str| crate::inbox::Message {
             id: id.into(),
@@ -3970,9 +4107,9 @@ mod tests {
                 ResourceKey::Courses,
                 ResourceKey::Planner(month.clone()),
                 ResourceKey::Colors,
-                ResourceKey::Conversations("inbox".into()),
+                ResourceKey::Conversations("unread".into()),
             ],
-            "courses, the month shown, course colours and the Inbox are read together"
+            "courses, the month shown, course colours and the unread count are read together"
         );
         let send_fetch = |app: &mut App, i: usize, payload: Payload| {
             deliver(

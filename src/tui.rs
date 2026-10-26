@@ -1172,9 +1172,23 @@ pub fn dump(config: &Config, out: &Path, course: &str, assignment: &str) -> Resu
                 "7-download_notice".into(),
                 serde_json::json!(app.notice.is_some()),
             );
-            render(&mut app, "7-download", &mut timings)?;
+            step(&mut app, vec![], "7-download", &mut timings)?;
         }
     }
+    // The Inbox, reached the way a person reaches it: Esc back to the home
+    // screen, Tab to the box, Enter. Then one folder step, which is what
+    // shows that each folder is read as it is shown.
+    let mut back = Vec::new();
+    while !matches!(app.view().kind, crate::app::ViewKind::Courses) {
+        back.extend(app.update(press(KeyCode::Esc)));
+    }
+    step(&mut app, back, "8-home", &mut timings)?;
+    app.update(press(KeyCode::Tab));
+    app.update(press(KeyCode::Tab));
+    let effects = app.update(press(KeyCode::Enter));
+    step(&mut app, effects, "8b-inbox", &mut timings)?;
+    let effects = app.update(press(KeyCode::Right));
+    step(&mut app, effects, "8c-inbox-folder", &mut timings)?;
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::write(
         out.join("dump-timings.json"),

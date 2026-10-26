@@ -540,7 +540,12 @@ pub enum ViewKind {
         course_id: String,
         course_name: String,
     },
-    /// One Inbox conversation, opened from the home screen's Inbox.
+    /// Every conversation in one folder, opened from the home screen's
+    /// widget. The folder lives here because a view has to be able to say
+    /// which resource it shows; `App::inbox_folder` remembers which one to
+    /// open next time.
+    Inbox { folder: crate::inbox::Folder },
+    /// One Inbox conversation, opened from the Inbox.
     Conversation {
         conversation_id: String,
         subject: String,
@@ -690,6 +695,7 @@ impl View {
             ViewKind::Conversation {
                 conversation_id, ..
             } => ResourceKey::Conversation(conversation_id.clone()),
+            ViewKind::Inbox { folder } => ResourceKey::Conversations(folder.id().to_string()),
         }
     }
 }
@@ -1061,7 +1067,9 @@ impl App {
         // with the course list.
         if self.view().kind == ViewKind::Courses {
             effects.extend(self.read_calendar(explicit));
-            effects.extend(self.read_inbox(explicit));
+            // The widget shows a count, so only the Unread folder is needed.
+            // The folder lists themselves are read by the Inbox screen.
+            effects.extend(self.read_unread());
         }
         // Past submissions are part of the assignment page: read them with it
         // when the copy on hand shows something was submitted.
@@ -1683,7 +1691,8 @@ impl App {
             | ViewKind::Announcement { .. }
             | ViewKind::WikiPage { .. }
             | ViewKind::CourseHome { .. }
-            | ViewKind::Conversation { .. } => vec![],
+            | ViewKind::Conversation { .. }
+            | ViewKind::Inbox { .. } => vec![],
             ViewKind::Files { .. } => (0..self.file_rows().len()).collect(),
             ViewKind::Modules { course_id, .. } => self.visible_modules(course_id),
             ViewKind::Grades { course_id, .. } => self.visible_grades(course_id),
@@ -2889,10 +2898,13 @@ impl App {
             scopes.push(Scope::SignedOut);
         }
         match &view.kind {
+            ViewKind::Inbox { .. } => scopes.push(Scope::Inbox),
             ViewKind::Courses => match self.focus() {
                 Section::Calendar => scopes.extend([Scope::Courses, Scope::Calendar]),
                 Section::Day => scopes.extend([Scope::Courses, Scope::Day]),
-                Section::Inbox => scopes.extend([Scope::Courses, Scope::Inbox]),
+                // The home screen shows a count in a box; the folders and the
+                // conversations are on the Inbox screen behind it.
+                Section::Inbox => scopes.extend([Scope::Courses, Scope::InboxWidget]),
                 _ => scopes.extend([Scope::List, Scope::Courses]),
             },
             ViewKind::Assignments { .. }
@@ -3138,7 +3150,16 @@ impl App {
                 (None, Section::Calendar | Section::Day) => {
                     !self.day_items(self.calendar_day).is_empty()
                 }
-                (None, Section::Inbox) => !self.inbox_rows().is_empty(),
+                // The box opens whether or not anything is waiting: the
+                // folders are read by the screen it opens, not by the home
+                // screen, so there is nothing here to be empty.
+                (None, Section::Inbox) if self.view().kind == ViewKind::Courses => true,
+                // On the Inbox screen itself, Enter opens the conversation
+                // selected. Conversations are not `visible_rows`, so this
+                // would otherwise read as nothing to open.
+                (None, _) if matches!(self.view().kind, ViewKind::Inbox { .. }) => {
+                    !self.inbox_rows().is_empty()
+                }
                 (None, _) => !self.visible_rows().is_empty(),
             },
             Act::Download if self.focus() == Section::Feedback => {
@@ -3436,9 +3457,7 @@ impl App {
             if !typing_text {
                 draft.suggestions.update(&draft.input);
             }
-            return;
         }
-
     }
 
     /// Carry out an action.
@@ -3853,7 +3872,7 @@ impl App {
                 found.push((score, course.id.clone()));
             }
         }
-        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found.sort_by_key(|a| std::cmp::Reverse(a.0));
         found
     }
 
@@ -4281,8 +4300,16 @@ impl App {
         if self.view().kind == ViewKind::Courses && self.focus() == Section::Calendar {
             return self.move_day(act);
         }
-        if self.focus() == Section::Inbox && matches!(act, Act::Left | Act::Right) {
+        if matches!(self.view().kind, ViewKind::Inbox { .. })
+            && matches!(act, Act::Left | Act::Right)
+        {
             return self.move_folder(act == Act::Right);
+        }
+        // On a home-screen widget the arrows move between widgets. There is
+        // one for now, so they do nothing; what they must not do is reach the
+        // course list behind it.
+        if self.view().kind == ViewKind::Courses && self.focus() == Section::Inbox {
+            return vec![];
         }
         if matches!(act, Act::Left | Act::Right) {
             return vec![];
@@ -4302,7 +4329,7 @@ impl App {
                 (self.day_item as isize + delta).clamp(0, n.saturating_sub(1) as isize) as usize;
             return vec![];
         }
-        if self.focus() == Section::Inbox {
+        if matches!(self.view().kind, ViewKind::Inbox { .. }) {
             let n = self.inbox_rows().len();
             self.inbox_item =
                 (self.inbox_item as isize + delta).clamp(0, n.saturating_sub(1) as isize) as usize;
@@ -4383,6 +4410,34 @@ impl App {
         self.request(key, explicit).into_iter().collect()
     }
 
+    /// Read the Unread folder, which is all the home screen's widget needs.
+    fn read_unread(&mut self) -> Vec<Effect> {
+        let key = ResourceKey::Conversations(crate::inbox::Folder::Unread.id().to_string());
+        self.load_snapshot(&key);
+        self.request(key, false).into_iter().collect()
+    }
+
+    /// The Unread folder's resource, for the widget's own loading state.
+    pub fn unread_resource(&self) -> Option<&Resource<Vec<crate::inbox::Summary>>> {
+        self.conversations.get(crate::inbox::Folder::Unread.id())
+    }
+
+    /// How many conversations are unread, for the home screen's widget.
+    ///
+    /// Canvas's own unread set, less the ones read here. Reading a
+    /// conversation in TUICanvas deliberately tells Canvas nothing, so
+    /// Canvas's count alone would never go down as you work, and this number
+    /// is allowed to disagree with the one Canvas shows for that reason.
+    pub fn unread_conversations(&self) -> usize {
+        self.conversations
+            .get(crate::inbox::Folder::Unread.id())
+            .and_then(|r| r.data.as_deref())
+            .unwrap_or(&[])
+            .iter()
+            .filter(|c| !self.conversation_reads.contains(&c.id))
+            .count()
+    }
+
     /// The conversations of the folder shown, newest activity first.
     pub fn inbox_rows(&self) -> &[crate::inbox::Summary] {
         self.conversations
@@ -4403,7 +4458,23 @@ impl App {
     fn move_folder(&mut self, forward: bool) -> Vec<Effect> {
         self.inbox_folder = self.inbox_folder.step(forward);
         self.inbox_item = 0;
+        // The view has to agree, because it is what names the resource the
+        // screen shows and what the saved copy is looked up by.
+        let now = self.inbox_folder;
+        if let ViewKind::Inbox { folder } = &mut self.view_mut().kind {
+            *folder = now;
+        }
         self.read_inbox(false)
+    }
+
+    /// `Enter` on the home screen's box: the Inbox itself, at whichever
+    /// folder was last looked at.
+    fn open_inbox(&mut self) -> Vec<Effect> {
+        self.inbox_item = 0;
+        self.stack.push(View::new(ViewKind::Inbox {
+            folder: self.inbox_folder,
+        }));
+        self.enter_current(false)
     }
 
     /// `Enter` on the Inbox: open the selected conversation here.
@@ -5317,7 +5388,10 @@ impl App {
         if matches!(self.focus(), Section::Calendar | Section::Day) {
             return self.open_calendar_item();
         }
-        if self.focus() == Section::Inbox {
+        if self.focus() == Section::Inbox && self.view().kind == ViewKind::Courses {
+            return self.open_inbox();
+        }
+        if matches!(self.view().kind, ViewKind::Inbox { .. }) {
             return self.open_conversation();
         }
         let rows = self.visible_rows();
@@ -5430,7 +5504,8 @@ impl App {
             | ViewKind::Announcement { .. }
             | ViewKind::WikiPage { .. }
             | ViewKind::CourseHome { .. }
-            | ViewKind::Conversation { .. } => return vec![],
+            | ViewKind::Conversation { .. }
+            | ViewKind::Inbox { .. } => return vec![],
             ViewKind::Files {
                 course_id,
                 course_name,
@@ -5533,11 +5608,14 @@ impl App {
                 }
                 Some(format!("{}/conversations/{conversation_id}", self.origin))
             }
+            // The home screen's box opens the Inbox itself; the screen opens
+            // whichever conversation is selected.
+            ViewKind::Inbox { .. } => Some(match self.selected_conversation() {
+                Some(c) => format!("{}/conversations/{}", self.origin, c.id),
+                None => format!("{}/conversations", self.origin),
+            }),
             ViewKind::Courses if self.focus() == Section::Inbox => {
-                Some(match self.selected_conversation() {
-                    Some(c) => format!("{}/conversations/{}", self.origin, c.id),
-                    None => format!("{}/conversations", self.origin),
-                })
+                Some(format!("{}/conversations", self.origin))
             }
             ViewKind::Announcements { course_id, .. } => {
                 let base = format!("{}/courses/{course_id}/announcements", self.origin);
@@ -6839,36 +6917,95 @@ mod tests {
         }
     }
 
-    /// The in-flight request for the Inbox folder shown.
-    fn pending_inbox(app: &App) -> u64 {
-        match app.conversations[app.inbox_folder.id()].sync {
-            SyncState::Syncing { request, .. } => request,
-            ref other => panic!("expected the Inbox to be syncing, got {other:?}"),
-        }
-    }
-
-    /// The home screen with the Inbox focused and one conversation listed.
+    /// The Inbox screen, opened the way a person opens it: Tab to the box on
+    /// the home screen, then Enter.
     fn inbox_app(library: Option<Arc<Library>>) -> App {
         let mut app = app_with_courses();
         app.library = library;
-        // Tab moves Courses -> Calendar -> Inbox.
+        // Tab moves Courses -> Calendar -> the Inbox box.
         app.update(key(KeyCode::Tab));
         assert_eq!(app.focus(), Section::Calendar);
         app.update(key(KeyCode::Tab));
         assert_eq!(app.focus(), Section::Inbox);
-        let request = pending_inbox(&app);
+        // The home screen only needs the count, so only Unread is read.
+        let unread = match app.conversations["unread"].sync {
+            SyncState::Syncing { request, .. } => request,
+            ref other => panic!("expected Unread to be syncing, got {other:?}"),
+        };
         deliver(
             &mut app,
-            ResourceKey::Conversations("inbox".into()),
-            request,
+            ResourceKey::Conversations("unread".into()),
+            unread,
+            Payload::Conversations(vec![]),
+        );
+        // Enter opens the Inbox itself, which reads the folder it shows.
+        let (k, r) = fetch_of(&app.update(key(KeyCode::Enter)));
+        assert_eq!(k, ResourceKey::Conversations("inbox".into()));
+        deliver(
+            &mut app,
+            k,
+            r,
             Payload::Conversations(vec![conversation("5", "Lab 3 feedback", "unread")]),
         );
         app
     }
 
     #[test]
-    fn the_inbox_is_a_home_section_with_every_folder_and_opens_a_conversation() {
+    fn the_unread_count_falls_as_conversations_are_read_here() {
+        let mut app = app_with_courses();
+        app.update(key(KeyCode::Tab));
+        app.update(key(KeyCode::Tab));
+        let request = match app.conversations["unread"].sync {
+            SyncState::Syncing { request, .. } => request,
+            ref other => panic!("expected Unread to be syncing, got {other:?}"),
+        };
+        deliver(
+            &mut app,
+            ResourceKey::Conversations("unread".into()),
+            request,
+            Payload::Conversations(vec![
+                conversation("5", "Lab 3 feedback", "unread"),
+                conversation("6", "Office hours moved", "unread"),
+            ]),
+        );
+        assert_eq!(app.unread_conversations(), 2);
+        // Open the Inbox, open the first conversation, and read it.
+        let (k, r) = fetch_of(&app.update(key(KeyCode::Enter)));
+        deliver(
+            &mut app,
+            k,
+            r,
+            Payload::Conversations(vec![conversation("5", "Lab 3 feedback", "unread")]),
+        );
+        let (k, r) = fetch_of(&app.update(key(KeyCode::Enter)));
+        let detail = crate::inbox::Detail {
+            base: conversation("5", "Lab 3 feedback", "unread"),
+            messages: vec![crate::inbox::Message {
+                id: "9".into(),
+                created_at: Some(Utc::now()),
+                body: Some("Notes are attached.".into()),
+                author_id: Some("7".into()),
+                ..Default::default()
+            }],
+        };
+        deliver(&mut app, k, r, Payload::Conversation(Box::new(detail)));
+        // Canvas still calls it unread, and is never told otherwise; the
+        // count on the home screen is the one that moved.
+        assert_eq!(app.unread_conversations(), 1);
+        assert_eq!(
+            app.conversations["unread"]
+                .data
+                .as_ref()
+                .map(|c| c.len())
+                .unwrap_or(0),
+            2
+        );
+    }
+
+    #[test]
+    fn the_inbox_is_a_screen_with_every_folder_and_opens_a_conversation() {
         let mut app = inbox_app(None);
+        assert!(matches!(app.view().kind, ViewKind::Inbox { .. }));
         assert!(app.scopes().contains(&Scope::Inbox));
         assert_eq!(app.inbox_rows().len(), 1);
         assert_eq!(app.selected_conversation().unwrap().id, "5");
@@ -6934,12 +7071,18 @@ mod tests {
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target, Target::File { id: "9".into() });
         assert!(app.browser_url().unwrap().ends_with("/conversations/5"));
-        // Esc leaves the page; the home screen is a new visit.
+        // Esc leaves the conversation for the Inbox it was opened from, and
+        // again for the home screen. Each is a new visit, so each is re-read.
+        assert_eq!(
+            fetch_of(&app.update(key(KeyCode::Esc))).0,
+            ResourceKey::Conversations("inbox".into())
+        );
+        assert!(matches!(app.view().kind, ViewKind::Inbox { .. }));
         assert_eq!(
             fetch_of(&app.update(key(KeyCode::Esc))).0,
             ResourceKey::Courses
         );
-        assert_eq!(app.focus(), Section::Inbox);
+        assert_eq!(app.focus(), Section::Inbox, "back on the Inbox box");
     }
 
     #[test]
@@ -7028,16 +7171,12 @@ mod tests {
         assert_eq!(app.conversation_status(&summary), "Read");
         // A later refresh still reports Canvas's own unread state, and the
         // reader keeps showing Read.
+        // Esc returns to the Inbox, which re-reads the folder. Canvas still
+        // reports the conversation as unread, and the reader keeps its own
+        // mark alongside that.
         let (k, r) = fetch_of(&app.update(key(KeyCode::Esc)));
-        assert_eq!(k, ResourceKey::Courses);
-        deliver(&mut app, k, r, Payload::Courses(vec![]));
-        let request = pending_inbox(&app);
-        deliver(
-            &mut app,
-            ResourceKey::Conversations("inbox".into()),
-            request,
-            Payload::Conversations(vec![summary.clone()]),
-        );
+        assert_eq!(k, ResourceKey::Conversations("inbox".into()));
+        deliver(&mut app, k, r, Payload::Conversations(vec![summary.clone()]));
         assert_eq!(app.conversation_status(&summary), "Read");
         assert_eq!(
             app.conversations["inbox"].data.as_ref().unwrap()[0]
