@@ -1,4 +1,4 @@
-# TUICanvas
+# canter
 
 A fast, keyboard-driven terminal interface for [Canvas LMS](https://www.instructure.com/canvas), built first for the University of Florida's Canvas (`ufl.instructure.com`).
 
