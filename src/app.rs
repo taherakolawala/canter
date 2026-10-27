@@ -468,6 +468,20 @@ pub struct PaletteState {
     pub selected: usize,
 }
 
+/// A score being tried on one assignment of the Grades tab.
+///
+/// The guess lives in `App::whatif` once it is entered; this is only the box
+/// while it is being typed.
+#[derive(Clone, Debug, Default)]
+pub struct WhatIfInput {
+    pub course_id: String,
+    pub assignment_id: String,
+    /// The assignment's name, for the box to say what is being guessed at.
+    pub title: String,
+    pub points: Option<f64>,
+    pub input: String,
+}
+
 /// The actions menu (`Space`).
 #[derive(Clone, Debug, Default)]
 pub struct MenuState {
@@ -768,6 +782,16 @@ pub struct App {
     pub menu: Option<MenuState>,
     /// The search palette, while it is open.
     pub palette: Option<PaletteState>,
+    /// Scores the student is trying out, by course and then assignment.
+    ///
+    /// These are the student's own question, not Canvas's answer: nothing is
+    /// sent to Canvas and nothing is written to disk, so they last as long as
+    /// the program runs and no longer. Canvas's own what-if scores behave the
+    /// same way, and a guess that outlived the run would be indistinguishable
+    /// from a real grade a week later.
+    pub whatif: HashMap<String, crate::grades::WhatIf>,
+    /// The score being typed, while the box is open.
+    pub whatif_input: Option<WhatIfInput>,
     /// Lists the palette still wants, read a couple at a time in the
     /// background so that searching can find a course never opened.
     pub warm_queue: std::collections::VecDeque<ResourceKey>,
@@ -920,6 +944,8 @@ impl App {
             submission: None,
             menu: None,
             palette: None,
+            whatif: HashMap::new(),
+            whatif_input: None,
             warm_queue: std::collections::VecDeque::new(),
             warm_running: 0,
             warm_keys: Vec::new(),
@@ -1839,6 +1865,130 @@ impl App {
         };
         let index = *self.visible_rows().get(self.view().selected)?;
         self.grade_rows(course_id).get(index).copied()
+    }
+
+    /// The scores being tried on a course, if any.
+    pub fn whatif_of(&self, course_id: &str) -> Option<&crate::grades::WhatIf> {
+        self.whatif.get(course_id).filter(|w| !w.is_empty())
+    }
+
+    /// The score being tried on one assignment.
+    pub fn whatif_score(&self, course_id: &str, assignment_id: &str) -> Option<f64> {
+        self.whatif.get(course_id)?.get(assignment_id).copied()
+    }
+
+    /// The course percentage as it stands, and as the tried scores would make
+    /// it. Both are this reader's own arithmetic over what Canvas sent, so
+    /// they are comparable with each other; `Grades::computed` says why they
+    /// can differ from the total Canvas shows.
+    pub fn whatif_totals(&self, course_id: &str) -> Option<(Option<f64>, Option<f64>)> {
+        let grades = self.grades.get(course_id)?.data.as_ref()?;
+        let guesses = self.whatif_of(course_id)?;
+        Some((
+            grades.computed(&crate::grades::WhatIf::new()),
+            grades.computed(guesses),
+        ))
+    }
+
+    /// `w` on the Grades tab: start typing a score for the selected
+    /// assignment, starting from whatever is being tried on it already.
+    fn open_whatif(&mut self) {
+        let ViewKind::Grades { course_id, .. } = &self.view().kind else {
+            return;
+        };
+        let course_id = course_id.clone();
+        let Some(GradeRow::Assignment(_, assignment)) = self.selected_grade_row() else {
+            return;
+        };
+        let (assignment_id, title, possible) = (
+            assignment.id.clone(),
+            assignment.title().to_string(),
+            assignment.points_possible,
+        );
+        let input = match self.whatif_score(&course_id, &assignment_id) {
+            Some(score) => points(score),
+            None => String::new(),
+        };
+        self.whatif_input = Some(WhatIfInput {
+            course_id,
+            assignment_id,
+            title,
+            points: possible,
+            input,
+        });
+        self.dirty = true;
+    }
+
+    /// Keys while a score is being typed.
+    fn whatif_act(&mut self, act: Act) -> Vec<Effect> {
+        let Some(draft) = &mut self.whatif_input else {
+            return vec![];
+        };
+        match act {
+            Act::InputClear => draft.input.clear(),
+            Act::InputCancel => self.whatif_input = None,
+            Act::InputDone => {
+                let draft = self.whatif_input.take().expect("the box is open");
+                self.apply_whatif(draft);
+            }
+            _ => {}
+        }
+        self.dirty = true;
+        vec![]
+    }
+
+    /// Take the typed score. An empty box puts the assignment back to
+    /// whatever Canvas says, which is how a guess is undone one at a time.
+    fn apply_whatif(&mut self, draft: WhatIfInput) {
+        let typed = draft.input.trim();
+        if typed.is_empty() {
+            if let Some(course) = self.whatif.get_mut(&draft.course_id) {
+                course.remove(&draft.assignment_id);
+            }
+            self.notice = Some(format!("{}: back to the real score.", draft.title));
+            return;
+        }
+        let Ok(score) = typed.parse::<f64>() else {
+            self.notice = Some("A score has to be a number.".into());
+            return;
+        };
+        if !score.is_finite() || score < 0.0 {
+            self.notice = Some("A score cannot be less than nothing.".into());
+            return;
+        }
+        self.whatif
+            .entry(draft.course_id)
+            .or_default()
+            .insert(draft.assignment_id, score);
+        // Scoring above the points possible is extra credit, which Canvas
+        // allows, so it is worth saying out loud rather than refusing.
+        if draft.points.is_some_and(|p| p > 0.0 && score > p) {
+            self.notice = Some(format!(
+                "{} is more than {} is worth: counted as extra credit.",
+                points(score),
+                draft.title
+            ));
+        }
+    }
+
+    /// `W`: drop every score being tried on this course.
+    fn clear_whatif(&mut self) {
+        let ViewKind::Grades { course_id, .. } = &self.view().kind else {
+            return;
+        };
+        let course_id = course_id.clone();
+        let count = self
+            .whatif
+            .remove(&course_id)
+            .map(|w| w.len())
+            .unwrap_or_default();
+        if count > 0 {
+            self.notice = Some(match count {
+                1 => "The score you tried is gone.".into(),
+                n => format!("The {n} scores you tried are gone."),
+            });
+        }
+        self.dirty = true;
     }
 
     /// Whether an assignment has instructor comments that have not been opened
@@ -2892,6 +3042,9 @@ impl App {
                 vec![Scope::TextInput]
             };
         }
+        if self.whatif_input.is_some() {
+            return vec![Scope::WhatIfInput];
+        }
         let view = self.view();
         let mut scopes = vec![Scope::Screen];
         if self.login_required {
@@ -2907,9 +3060,11 @@ impl App {
                 Section::Inbox => scopes.extend([Scope::Courses, Scope::InboxWidget]),
                 _ => scopes.extend([Scope::List, Scope::Courses]),
             },
+            ViewKind::Grades { .. } => {
+                scopes.extend([Scope::List, Scope::CourseTabs, Scope::Grades])
+            }
             ViewKind::Assignments { .. }
             | ViewKind::Announcements { .. }
-            | ViewKind::Grades { .. }
             | ViewKind::Pages { .. } => scopes.extend([Scope::List, Scope::CourseTabs]),
             // Modules share the Files keys: d, D and e work on module files.
             ViewKind::Files { .. } | ViewKind::Modules { .. } => {
@@ -3162,6 +3317,16 @@ impl App {
                 }
                 (None, _) => !self.visible_rows().is_empty(),
             },
+            // A score can only be tried on an assignment, not on a group
+            // heading, and there is nothing to clear until one has been.
+            Act::WhatIf => matches!(
+                self.selected_grade_row(),
+                Some(GradeRow::Assignment(..))
+            ),
+            Act::ClearWhatIf => match &self.view().kind {
+                ViewKind::Grades { course_id, .. } => self.whatif_of(course_id).is_some(),
+                _ => false,
+            },
             Act::Download if self.focus() == Section::Feedback => {
                 !self.selected_feedback_files().is_empty()
             }
@@ -3407,6 +3572,19 @@ impl App {
             palette.selected = 0;
             return;
         }
+        if let Some(draft) = &mut self.whatif_input {
+            if erase {
+                draft.input.pop();
+            } else if let Some(c) = typed
+                // A score is a number: letters would only be rejected later,
+                // and a box that swallows them looks broken.
+                && (c.is_ascii_digit() || (c == '.' && !draft.input.contains('.')))
+                && draft.input.chars().count() < 8
+            {
+                draft.input.push(c);
+            }
+            return;
+        }
         if let Some(menu) = &mut self.menu {
             let search = menu.search.get_or_insert_with(String::new);
             if erase {
@@ -3477,6 +3655,9 @@ impl App {
         if self.palette.is_some() {
             return self.palette_act(act);
         }
+        if self.whatif_input.is_some() {
+            return self.whatif_act(act);
+        }
         let page = self.view().kind.page();
         match act {
             Act::Quit => {
@@ -3526,6 +3707,14 @@ impl App {
                 vec![]
             }
             Act::Palette => self.open_palette(),
+            Act::WhatIf => {
+                self.open_whatif();
+                vec![]
+            }
+            Act::ClearWhatIf => {
+                self.clear_whatif();
+                vec![]
+            }
             Act::Help => {
                 self.help = Some(0);
                 vec![]
@@ -8261,6 +8450,140 @@ mod tests {
         // Every heading and every row under it is listed: narrowing a list
         // in place is gone, and the palette searches instead.
         assert_eq!(app.visible_rows(), [0, 1, 2, 3, 4]);
+    }
+
+    /// Type a score into the open what-if box.
+    fn type_score(app: &mut App, score: &str) {
+        for c in score.chars() {
+            app.update(key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn a_score_tried_on_one_assignment_moves_the_total_and_nothing_else() {
+        let mut app = grades_app(None);
+        // 40% homework (9 of 10 graded, 10 points ungraded) and 60% exams
+        // (88 of 100) is 88.8 as the reader counts it.
+        assert_eq!(app.whatif_totals("10"), None, "nothing tried yet");
+        // `w` on the first assignment, then a score.
+        app.update(key(KeyCode::Down)); // HW 2, the ungraded one
+        assert!(matches!(
+            app.selected_grade_row(),
+            Some(GradeRow::Assignment(_, a)) if a.id == "2"
+        ));
+        let effects = app.update(key(KeyCode::Char('w')));
+        assert!(effects.is_empty(), "a guess asks Canvas for nothing");
+        assert!(app.scopes().contains(&Scope::WhatIfInput));
+        type_score(&mut app, "10");
+        let effects = app.update(key(KeyCode::Enter));
+        assert!(effects.is_empty(), "and sends Canvas nothing");
+        assert!(app.whatif_input.is_none(), "the box closes");
+        assert_eq!(app.whatif_score("10", "2"), Some(10.0));
+        // Homework becomes 19 of 20, so the total becomes 0.4*95 + 0.6*88.
+        let (now, projected) = app.whatif_totals("10").expect("both totals");
+        assert!((now.unwrap() - 88.8).abs() < 0.005, "{now:?}");
+        assert!((projected.unwrap() - 90.8).abs() < 0.005, "{projected:?}");
+        // What Canvas said is left exactly as Canvas said it.
+        let grades = app.grades["10"].data.as_ref().unwrap();
+        assert_eq!(grades.total.as_ref().unwrap().score, Some(91.5));
+        assert_eq!(grades.groups[0].assignments[1].submission.as_ref().unwrap().score, None);
+    }
+
+    #[test]
+    fn a_tried_score_can_be_taken_back_one_at_a_time_or_all_at_once() {
+        let mut app = grades_app(None);
+        app.update(key(KeyCode::Char('w')));
+        type_score(&mut app, "7");
+        app.update(key(KeyCode::Enter));
+        app.update(key(KeyCode::Down));
+        app.update(key(KeyCode::Char('w')));
+        type_score(&mut app, "8");
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.whatif_of("10").map(|w| w.len()), Some(2));
+        // The box opens on what is already being tried, and emptying it puts
+        // the real score back.
+        app.update(key(KeyCode::Char('w')));
+        assert_eq!(app.whatif_input.as_ref().unwrap().input, "8");
+        app.update(ctrl('u'));
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.whatif_score("10", "2"), None);
+        assert_eq!(app.whatif_score("10", "1"), Some(7.0));
+        // Esc leaves the score alone rather than clearing it.
+        app.update(key(KeyCode::Char('w')));
+        type_score(&mut app, "3");
+        app.update(key(KeyCode::Esc));
+        assert_eq!(app.whatif_score("10", "2"), None);
+        // `W` drops the rest.
+        app.update(key(KeyCode::Char('W')));
+        assert_eq!(app.whatif_of("10"), None);
+        assert_eq!(app.whatif_totals("10"), None);
+    }
+
+    #[test]
+    fn the_box_takes_a_score_and_only_a_score() {
+        let mut app = grades_app(None);
+        app.update(key(KeyCode::Char('w')));
+        // Letters are not scores, so they are not typed at all.
+        type_score(&mut app, "9a.5b.2");
+        assert_eq!(app.whatif_input.as_ref().unwrap().input, "9.52");
+        app.update(ctrl('u'));
+        // A lone point is not a number either, and says so.
+        type_score(&mut app, ".");
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.notice.as_deref(), Some("A score has to be a number."));
+        assert_eq!(app.whatif_score("10", "1"), None);
+        // Above the points possible is extra credit, which Canvas allows.
+        app.update(key(KeyCode::Char('w')));
+        type_score(&mut app, "12");
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.whatif_score("10", "1"), Some(12.0));
+        assert!(
+            app.notice.as_deref().unwrap_or_default().contains("extra credit"),
+            "{:?}",
+            app.notice
+        );
+    }
+
+    #[test]
+    fn a_score_can_only_be_tried_on_an_assignment_and_cleared_when_one_has_been() {
+        let mut app = grades_app(None);
+        assert!(app.available(Act::WhatIf));
+        assert!(!app.available(Act::ClearWhatIf), "nothing tried yet");
+        // A group heading is not something to score. The cursor steps over
+        // headings, so this is the one place that puts it on one.
+        app.stack.last_mut().expect("a view").selected = 3;
+        assert!(matches!(app.selected_grade_row(), Some(GradeRow::Group(_))));
+        assert!(!app.available(Act::WhatIf));
+        app.update(key(KeyCode::Char('w')));
+        assert!(app.whatif_input.is_none(), "and the box does not open");
+        // With a score tried, clearing becomes available.
+        app.stack.last_mut().expect("a view").selected = 4;
+        app.update(key(KeyCode::Char('w')));
+        type_score(&mut app, "5");
+        app.update(key(KeyCode::Enter));
+        assert!(app.available(Act::ClearWhatIf));
+    }
+
+    #[test]
+    fn a_tried_score_survives_a_refresh_but_not_a_restart() {
+        let root = std::env::temp_dir().join(format!("canter-whatif-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Arc::new(SnapshotStore::new(&root, "reader"));
+        let mut app = grades_app(Some(store.clone()));
+        app.update(key(KeyCode::Char('w')));
+        type_score(&mut app, "5");
+        app.update(key(KeyCode::Enter));
+        assert_eq!(app.whatif_score("10", "1"), Some(5.0));
+        // `r` re-reads the grades; the question being asked is still the same
+        // question when the answer comes back.
+        let (k, r) = fetch_of(&app.update(key(KeyCode::Char('r'))));
+        deliver(&mut app, k, r, grades_payload());
+        assert_eq!(app.whatif_score("10", "1"), Some(5.0));
+        // Nothing was written down, so a later run starts from the real
+        // grades rather than from last week's guesses.
+        let next = App::new(ORIGIN, Some(store));
+        assert!(next.whatif.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

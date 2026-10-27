@@ -62,10 +62,16 @@ impl Group {
         self.name.as_deref().unwrap_or("Assignments")
     }
 
-    /// Points earned and points possible over the graded assignments, which is
-    /// what Canvas uses for the group's own percentage. Excused and omitted
-    /// work counts for neither side.
-    pub fn earned(&self) -> Option<(f64, f64)> {
+    /// Points earned and points possible over the graded assignments, which
+    /// is what Canvas uses for the group's own percentage. Excused and
+    /// omitted work counts for neither side.
+    ///
+    /// A guess counts its assignment in even when Canvas has not graded it,
+    /// or has excused it, because that is the question being asked: what the
+    /// total becomes if this work scores that. Work the instructor omits from
+    /// the final grade still counts for nothing, guess or no guess, since
+    /// scoring it cannot move the total.
+    pub fn earned_with(&self, guesses: &WhatIf) -> Option<(f64, f64)> {
         let mut score = 0.0;
         let mut possible = 0.0;
         let mut any = false;
@@ -73,13 +79,19 @@ impl Group {
             if a.omit_from_final_grade == Some(true) {
                 continue;
             }
-            let Some(s) = a.submission.as_ref() else {
-                continue;
+            let earned = match guesses.get(&a.id) {
+                Some(guess) => *guess,
+                None => {
+                    let Some(s) = a.submission.as_ref() else {
+                        continue;
+                    };
+                    if s.excused == Some(true) {
+                        continue;
+                    }
+                    let Some(earned) = s.score else { continue };
+                    earned
+                }
             };
-            if s.excused == Some(true) {
-                continue;
-            }
-            let Some(earned) = s.score else { continue };
             any = true;
             score += earned;
             possible += a.points_possible.unwrap_or(0.0);
@@ -87,6 +99,11 @@ impl Group {
         any.then_some((score, possible))
     }
 }
+
+/// Hypothetical scores, by assignment id: what the student is asking the
+/// total would be if this work scored that. Never sent to Canvas, and never
+/// written to disk.
+pub type WhatIf = std::collections::HashMap<String, f64>;
 
 /// Instructor comments on one assignment, as far as the reader knows.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -270,6 +287,56 @@ impl Grades {
     pub fn is_empty(&self) -> bool {
         self.groups.iter().all(|g| g.assignments.is_empty())
     }
+
+    /// The course percentage this reader computes, with any hypothetical
+    /// scores standing in. `None` when nothing counts towards it yet.
+    ///
+    /// Canvas's rules, as far as a reader can follow them: a weighted course
+    /// scores each group on its own points and weights those percentages,
+    /// leaving out groups with nothing graded and scaling the weights that
+    /// remain back up to the whole, so a term whose first weeks hold only
+    /// homework does not read as a fraction of the course. An unweighted
+    /// course is every point earned over every point possible.
+    ///
+    /// This is arithmetic on what Canvas sent, not a number from Canvas. It
+    /// can differ from the total Canvas shows — grading periods, dropped
+    /// lowest scores and never-graded rules all live on Canvas's side — which
+    /// is why the screen shows both and says which is which.
+    pub fn computed(&self, guesses: &WhatIf) -> Option<f64> {
+        let weighted = self.weighted
+            && self
+                .groups
+                .iter()
+                .any(|g| g.group_weight.unwrap_or(0.0) > 0.0);
+        if weighted {
+            let mut earned = 0.0;
+            let mut counted = 0.0;
+            for g in &self.groups {
+                let weight = g.group_weight.unwrap_or(0.0);
+                if weight <= 0.0 {
+                    continue;
+                }
+                // A group of nothing but zero-point work has no percentage to
+                // weigh, so it waits rather than counting as nought.
+                let Some((score, possible)) = g.earned_with(guesses).filter(|(_, p)| *p > 0.0)
+                else {
+                    continue;
+                };
+                earned += weight * score / possible;
+                counted += weight;
+            }
+            return (counted > 0.0).then(|| earned / counted * 100.0);
+        }
+        let mut score = 0.0;
+        let mut possible = 0.0;
+        for g in &self.groups {
+            if let Some((s, p)) = g.earned_with(guesses) {
+                score += s;
+                possible += p;
+            }
+        }
+        (possible > 0.0).then(|| score / possible * 100.0)
+    }
 }
 
 #[cfg(test)]
@@ -331,8 +398,8 @@ mod tests {
         let (grades, _) = read(&client(course_reads()), "1").await.unwrap();
         // HW 1 is excused and the survey is omitted from the final grade, so
         // only HW 2 counts: 9 of 10.
-        assert_eq!(grades.groups[0].earned(), Some((9.0, 10.0)));
-        assert_eq!(grades.groups[1].earned(), Some((88.0, 100.0)));
+        assert_eq!(grades.groups[0].earned_with(&WhatIf::new()), Some((9.0, 10.0)));
+        assert_eq!(grades.groups[1].earned_with(&WhatIf::new()), Some((88.0, 100.0)));
     }
 
     #[tokio::test]
@@ -402,5 +469,135 @@ mod tests {
             read(&client(t), "../1").await.unwrap_err(),
             CanvasError::Invalid("invalid course ID")
         );
+    }
+
+    /// A course with two weighted groups, one of them not yet graded.
+    fn weighted() -> Grades {
+        Grades {
+            total: None,
+            weighted: true,
+            groups: vec![
+                Group {
+                    id: "10".into(),
+                    name: Some("Homework".into()),
+                    group_weight: Some(40.0),
+                    assignments: vec![graded("1", 10.0, Some(8.0))],
+                    ..Default::default()
+                },
+                Group {
+                    id: "20".into(),
+                    name: Some("Final".into()),
+                    group_weight: Some(60.0),
+                    assignments: vec![graded("2", 100.0, None)],
+                    ..Default::default()
+                },
+            ],
+            feedback: vec![],
+        }
+    }
+
+    fn graded(id: &str, points: f64, score: Option<f64>) -> AssignmentSummary {
+        AssignmentSummary {
+            id: id.into(),
+            name: Some(format!("Work {id}")),
+            points_possible: Some(points),
+            submission: Some(crate::model::Submission {
+                score,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn guess(pairs: &[(&str, f64)]) -> WhatIf {
+        pairs.iter().map(|(id, s)| (id.to_string(), *s)).collect()
+    }
+
+    /// Percentages are compared to the hundredth: the arithmetic is binary
+    /// floating point, and a test that spells out all seventeen digits tests
+    /// the spelling rather than the sum.
+    #[track_caller]
+    fn near(got: Option<f64>, want: f64) {
+        let got = got.expect("a total");
+        assert!((got - want).abs() < 0.005, "{got} is not about {want}");
+    }
+
+    #[test]
+    fn a_weighted_total_counts_only_the_groups_with_something_in_them() {
+        let grades = weighted();
+        // Only homework is graded, so its 40% is the whole of what counts:
+        // 8 of 10 is 80%, not 32% of a course nobody has sat the final for.
+        assert_eq!(grades.computed(&WhatIf::new()), Some(80.0));
+        // Guessing the final brings its 60% in: 0.4*80 + 0.6*90 = 86.
+        assert_eq!(grades.computed(&guess(&[("2", 90.0)])), Some(86.0));
+        // A guess of nothing is still an answer, not an absence.
+        assert_eq!(grades.computed(&guess(&[("2", 0.0)])), Some(32.0));
+    }
+
+    #[test]
+    fn an_unweighted_total_is_every_point_over_every_point_possible() {
+        let mut grades = weighted();
+        grades.weighted = false;
+        assert_eq!(grades.computed(&WhatIf::new()), Some(80.0));
+        // 8 + 45 of 10 + 100.
+        near(grades.computed(&guess(&[("2", 45.0)])), 48.18);
+        // Weights that exist are ignored where the course does not apply them.
+        grades.groups[1].group_weight = Some(99.0);
+        near(grades.computed(&guess(&[("2", 45.0)])), 48.18);
+    }
+
+    #[test]
+    fn a_guess_counts_work_canvas_has_not_graded_or_has_excused() {
+        let mut grades = weighted();
+        grades.weighted = false;
+        // Excused work is outside the total until it is guessed at, which is
+        // how "what if this had counted" gets asked.
+        grades.groups[1].assignments[0].submission = Some(crate::model::Submission {
+            excused: Some(true),
+            ..Default::default()
+        });
+        assert_eq!(grades.computed(&WhatIf::new()), Some(80.0));
+        near(grades.computed(&guess(&[("2", 100.0)])), 98.18);
+        // Work the instructor omits from the final grade cannot move it,
+        // guessed or not.
+        grades.groups[1].assignments[0].omit_from_final_grade = Some(true);
+        assert_eq!(grades.computed(&guess(&[("2", 100.0)])), Some(80.0));
+    }
+
+    #[test]
+    fn a_guess_replaces_the_score_in_its_group_too() {
+        let grades = weighted();
+        let group = &grades.groups[0];
+        assert_eq!(group.earned_with(&WhatIf::new()), Some((8.0, 10.0)));
+        assert_eq!(group.earned_with(&guess(&[("1", 10.0)])), Some((10.0, 10.0)));
+        // Guessing at work in another group leaves this one alone.
+        assert_eq!(group.earned_with(&guess(&[("2", 10.0)])), Some((8.0, 10.0)));
+    }
+
+    #[test]
+    fn a_course_with_nothing_graded_has_no_total_to_compute() {
+        let mut grades = weighted();
+        grades.groups[0].assignments[0].submission = None;
+        assert_eq!(grades.computed(&WhatIf::new()), None);
+        grades.weighted = false;
+        assert_eq!(grades.computed(&WhatIf::new()), None);
+        // And a group of zero-point work is waited on rather than called nought.
+        let mut zero = weighted();
+        zero.groups[0].assignments[0].points_possible = Some(0.0);
+        zero.groups[1].assignments[0].submission = Some(crate::model::Submission {
+            score: Some(0.0),
+            ..Default::default()
+        });
+        assert_eq!(zero.computed(&WhatIf::new()), Some(0.0));
+    }
+
+    #[tokio::test]
+    async fn what_the_reader_computes_is_near_what_canvas_says() {
+        // The fixture is 40% homework (9 of 10) and 60% exams (88 of 100),
+        // which is 88.8; Canvas says 91.5 for the same course, because the
+        // total it sends follows rules a reader cannot see. Both are shown.
+        let (grades, _) = read(&client(course_reads()), "1").await.unwrap();
+        near(grades.computed(&WhatIf::new()), 88.8);
+        assert_eq!(grades.total.unwrap().score, Some(91.5));
     }
 }

@@ -496,6 +496,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.palette.is_some() {
         draw_palette(frame, main, app);
     }
+    if app.whatif_input.is_some() {
+        draw_whatif(frame, main, app);
+    }
     if app.help.is_some() {
         draw_help(frame, main, app);
     }
@@ -1762,6 +1765,47 @@ fn draw_page_list(
 
 /// The Grades tab: the course total where the instructor shows it, then the
 /// assignments under their Canvas group with the group's weight.
+/// The line under the course total: what the scores being tried would make
+/// it, and how far that is from where it stands.
+///
+/// Both numbers are this reader's own arithmetic, so they can be compared
+/// with each other; the total Canvas sends follows rules a reader cannot see,
+/// which is why the line says whose sum this is.
+fn whatif_line(app: &App, course_id: &str) -> Line<'static> {
+    let Some((now, projected)) = app.whatif_totals(course_id) else {
+        return Line::raw("");
+    };
+    let tried = app
+        .whatif_of(course_id)
+        .map(|w| w.len())
+        .unwrap_or_default();
+    let mut spans = vec![Span::styled("What if  ", theme::muted())];
+    match projected {
+        Some(score) => spans.push(Span::styled(crate::app::percent(score), theme::accent())),
+        None => spans.push(Span::styled("nothing counts yet", theme::muted())),
+    }
+    if let (Some(now), Some(score)) = (now, projected) {
+        let change = score - now;
+        spans.push(Span::styled(
+            format!(
+                "   {} now, {}{}",
+                crate::app::percent(now),
+                if change >= 0.0 { "+" } else { "-" },
+                crate::app::percent(change.abs())
+            ),
+            theme::faint(),
+        ));
+    }
+    spans.push(Span::styled(
+        match tried {
+            1 => "   1 score tried \u{b7} canter's own sum \u{b7} W clears it".to_string(),
+            n => format!("   {n} scores tried \u{b7} canter's own sum \u{b7} W clears them"),
+        },
+        theme::faint(),
+    ));
+    Line::from(spans)
+}
+
 fn draw_grades(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, now: DateTime<Utc>) {
     if placeholder(frame, area, app.grades.get(course_id), "grades") {
         return;
@@ -1771,7 +1815,8 @@ fn draw_grades(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, no
         .get(course_id)
         .and_then(|r| r.data.as_ref())
         .map(|g| (g.total.clone(), g.weighted));
-    // One line for the course total, blank where the instructor hides it.
+    // One line for the course total, blank where the instructor hides it,
+    // and a second for the scores being tried, when any are.
     let [head, body] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
     let line = match &total {
         Some((Some(t), weighted)) => {
@@ -1794,7 +1839,7 @@ fn draw_grades(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, no
         ),
         None => Line::raw(""),
     };
-    frame.render_widget(Paragraph::new(vec![line, Line::raw("")]), head);
+    frame.render_widget(Paragraph::new(vec![line, whatif_line(app, course_id)]), head);
 
     let rows = app.visible_rows();
     if rows.is_empty() {
@@ -1821,6 +1866,8 @@ fn draw_grades(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, no
     }
     let (start, end) = window(app, rows.len(), usize::from(body.height.saturating_sub(1)));
     let selected = app.view().selected;
+    let none = crate::grades::WhatIf::new();
+    let guesses = app.whatif_of(course_id).unwrap_or(&none);
     let all = app.grade_rows(course_id);
     let marks: Vec<bool> = rows[start..end]
         .iter()
@@ -1841,7 +1888,7 @@ fn draw_grades(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, no
                         name.push_str(&format!("  ({} of the total)", crate::app::percent(weight)));
                     }
                     let score = g
-                        .earned()
+                        .earned_with(guesses)
                         .map(|(score, possible)| {
                             format!(
                                 "{} / {}",
@@ -1859,6 +1906,7 @@ fn draw_grades(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, no
                 }
                 GradeRow::Assignment(_, a) => {
                     let submission = a.submission.as_ref();
+                    let tried = guesses.get(&a.id).copied();
                     // What the row says in the score column: the score out of
                     // the points, or why there is no score.
                     let score = match submission {
@@ -1880,6 +1928,20 @@ fn draw_grades(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, no
                             .map(|p| format!("-- / {}", crate::app::points(p)))
                             .unwrap_or_default(),
                     };
+                    // A tried score stands where the real one would, and the
+                    // status column says so, because a number that looks like
+                    // a grade and is not would be the worst of both.
+                    let score = match tried {
+                        Some(guess) => match a.points_possible {
+                            Some(possible) => format!(
+                                "{} / {}",
+                                crate::app::points(guess),
+                                crate::app::points(possible)
+                            ),
+                            None => crate::app::points(guess),
+                        },
+                        None => score,
+                    };
                     let graded = submission.is_some_and(|s| s.score.is_some());
                     let (state, style) = match submission {
                         Some(s) if s.excused == Some(true) => (String::new(), theme::muted()),
@@ -1897,6 +1959,10 @@ fn draw_grades(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, no
                         }
                         _ => (String::new(), theme::muted()),
                     };
+                    let (state, style) = match tried {
+                        Some(_) => ("what if".to_string(), theme::accent()),
+                        None => (state, style),
+                    };
                     let mark = if marks[i] { "* " } else { "  " };
                     Row::new(vec![
                         Cell::from(Line::from(vec![
@@ -1905,7 +1971,11 @@ fn draw_grades(frame: &mut Frame, area: Rect, app: &mut App, course_id: &str, no
                         ])),
                         Cell::from(a.due_at.map(|d| short_date(d, now)).unwrap_or_default())
                             .style(theme::due(a.due_at, graded, now)),
-                        Cell::from(score),
+                        Cell::from(score).style(if tried.is_some() {
+                            theme::accent()
+                        } else {
+                            theme::text()
+                        }),
                         Cell::from(state).style(style),
                     ])
                 }
@@ -3255,6 +3325,43 @@ fn draw_palette(frame: &mut Frame, area: Rect, app: &App) {
         Paragraph::new(lines.into_iter().skip(skip).collect::<Vec<_>>()).block(
             ratatui::widgets::Block::bordered()
                 .title(" Search ")
+                .border_style(theme::accent())
+                .padding(ratatui::widgets::Padding::horizontal(1)),
+        ),
+        rect,
+    );
+}
+
+/// `w` on the Grades tab: one small box asking what this assignment might
+/// score. Nothing here is sent to Canvas; the answer only changes the
+/// arithmetic on the screen underneath.
+fn draw_whatif(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(draft) = &app.whatif_input else {
+        return;
+    };
+    let rect = centered(area, 56, 5);
+    let out_of = match draft.points {
+        Some(points) => format!(" of {}", crate::app::points(points)),
+        None => String::new(),
+    };
+    let lines = vec![
+        Line::styled(truncate(&draft.title, 52), theme::heading()),
+        Line::from(vec![
+            Span::styled("score ", theme::faint()),
+            Span::styled(draft.input.clone(), theme::bold()),
+            Span::styled("\u{258f}", theme::key()),
+            Span::styled(out_of, theme::faint()),
+        ]),
+        Line::styled(
+            "Enter tries it \u{b7} empty puts the real score back",
+            theme::faint(),
+        ),
+    ];
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            ratatui::widgets::Block::bordered()
+                .title(" What if ")
                 .border_style(theme::accent())
                 .padding(ratatui::widgets::Padding::horizontal(1)),
         ),
@@ -4712,6 +4819,121 @@ mod tests {
             .collect();
         assert_eq!(marked.len(), 1);
         assert!(marked[0].contains("Lab one"));
+    }
+
+    /// The Grades tab of a weighted course: 40% homework (9 of 10 graded, one
+    /// lab ungraded) and 60% exams (88 of 100).
+    fn whatif_app() -> App {
+        let mut app = App::new("https://ufl.instructure.com", None);
+        app.stack = vec![crate::app::View::new(ViewKind::Grades {
+            course_id: "1".into(),
+            course_name: "Course".into(),
+        })];
+        let graded = |id: &str, name: &str, points: f64, score: Option<f64>| AssignmentSummary {
+            id: id.into(),
+            name: Some(name.into()),
+            points_possible: Some(points),
+            submission: Some(crate::model::Submission {
+                score,
+                workflow_state: Some("graded".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let r = app.grades.entry("1".to_string()).or_default();
+        r.data = Some(crate::grades::Grades {
+            total: Some(crate::grades::Total {
+                score: Some(91.5),
+                grade: Some("A-".into()),
+            }),
+            weighted: true,
+            groups: vec![
+                crate::grades::Group {
+                    id: "100".into(),
+                    name: Some("Homework".into()),
+                    group_weight: Some(40.0),
+                    assignments: vec![
+                        graded("1", "Lab one", 10.0, Some(9.0)),
+                        graded("2", "Lab two", 10.0, None),
+                    ],
+                    ..Default::default()
+                },
+                crate::grades::Group {
+                    id: "200".into(),
+                    name: Some("Exams".into()),
+                    group_weight: Some(60.0),
+                    assignments: vec![graded("5", "Midterm", 100.0, Some(88.0))],
+                    ..Default::default()
+                },
+            ],
+            feedback: vec![],
+        });
+        r.version += 1;
+        app
+    }
+
+    #[test]
+    fn a_tried_score_shows_in_its_row_its_group_and_the_total() {
+        let mut app = whatif_app();
+        let press =
+            |app: &mut App, code| app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        // The box says which assignment it is asking about, and out of what.
+        // The cursor starts on the group heading, so two rows down is the
+        // ungraded lab.
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('w'));
+        let box_open = screen(&mut app, 100, 16);
+        println!("{box_open}\n");
+        for part in ["What if", "Lab two", "score", "of 10", "Enter tries it"] {
+            assert!(box_open.contains(part), "{part} missing:\n{box_open}");
+        }
+        for c in "10".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Enter);
+        let rendered = screen(&mut app, 100, 16);
+        println!("{rendered}\n");
+        // The row carries the tried score and says that is what it is.
+        let row = rendered
+            .lines()
+            .find(|l| l.contains("Lab two"))
+            .expect("the row");
+        assert!(row.contains("10 / 10") && row.contains("what if"), "{row}");
+        // The group counts it: 19 of 20 rather than 9 of 10.
+        let group = rendered
+            .lines()
+            .find(|l| l.contains("Homework"))
+            .expect("the heading");
+        assert!(group.contains("19 / 20"), "{group}");
+        // And the line under the total does the sum, with Canvas's own total
+        // still on the line above it.
+        assert!(rendered.contains("A-") && rendered.contains("91.5%"), "{rendered}");
+        assert!(rendered.contains("What if  90.8%"), "{rendered}");
+        assert!(rendered.contains("88.8% now, +2%"), "{rendered}");
+        assert!(rendered.contains("1 score tried"), "{rendered}");
+        assert!(rendered.contains("W clears it"), "{rendered}");
+        for (w, h) in [(60, 20), (40, 10), (20, 5), (1, 1)] {
+            let _ = screen(&mut app, w, h);
+        }
+    }
+
+    #[test]
+    fn a_score_can_be_tried_where_the_instructor_hides_the_total() {
+        let mut app = whatif_app();
+        app.grades.get_mut("1").expect("grades").data.as_mut().expect("data").total = None;
+        let press =
+            |app: &mut App, code| app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('w'));
+        press(&mut app, KeyCode::Char('5'));
+        press(&mut app, KeyCode::Enter);
+        let rendered = screen(&mut app, 100, 16);
+        println!("{rendered}\n");
+        assert!(rendered.contains("does not show the course total"));
+        // The arithmetic is the reader's own, so it still answers the question.
+        assert!(rendered.contains("What if"), "{rendered}");
+        assert!(rendered.contains("canter's own sum"), "{rendered}");
     }
 
     #[test]

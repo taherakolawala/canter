@@ -1067,6 +1067,18 @@ pub fn dump(config: &Config, out: &Path, course: &str, assignment: &str) -> Resu
             let effects = app.update(press(KeyCode::Tab));
             step(&mut app, effects, name, &mut timings)?;
         }
+        // A score tried on the Grades tab, which asks Canvas for nothing: the
+        // screen shows the reader's own arithmetic beside Canvas's total.
+        if wanted == CourseTab::Grades && tab_now(&app) == Some(CourseTab::Grades) {
+            app.update(press(KeyCode::Down));
+            app.update(press(KeyCode::Char('w')));
+            for c in "100".chars() {
+                app.update(press(KeyCode::Char(c)));
+            }
+            app.update(press(KeyCode::Enter));
+            step(&mut app, vec![], "4d2-whatif", &mut timings)?;
+            app.update(press(KeyCode::Char('W')));
+        }
     }
     while app.stack.len() > 2 {
         app.update(press(KeyCode::Esc));

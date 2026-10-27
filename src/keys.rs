@@ -45,6 +45,10 @@ pub enum Act {
     HideCourse,
     ShowHidden,
     ShowGrades,
+    /// Try a score on one assignment and see what the total becomes.
+    WhatIf,
+    /// Drop every score tried on this course.
+    ClearWhatIf,
     OpenLibrary,
     SignIn,
     Reply,
@@ -59,7 +63,7 @@ pub enum Act {
 
 impl Act {
     #[cfg(test)]
-    pub const ALL: [Act; 39] = [
+    pub const ALL: [Act; 41] = [
         Act::Up,
         Act::Down,
         Act::Left,
@@ -89,6 +93,8 @@ impl Act {
         Act::HideCourse,
         Act::ShowHidden,
         Act::ShowGrades,
+        Act::WhatIf,
+        Act::ClearWhatIf,
         Act::OpenLibrary,
         Act::SignIn,
         Act::Reply,
@@ -127,6 +133,10 @@ pub enum Scope {
     Submissions,
     /// The instructor feedback section has focus.
     Feedback,
+    /// The Grades tab of a course.
+    Grades,
+    /// Typing a score to try on an assignment.
+    WhatIfInput,
     /// The month grid on the course list has focus.
     Calendar,
     /// The selected day's entries have focus.
@@ -508,6 +518,23 @@ pub static BINDINGS: &[Binding] = &[
     b(Act::ShowGrades, &[], &[Courses], "grades")
         .title("Show or hide the current grade of every course")
         .menu('g', Group::Here),
+    // The Grades tab.
+    b(Act::WhatIf, &[ch('w')], &[Grades], "what if")
+        .title("Try a score on this assignment")
+        .menu('w', Group::Selected)
+        .hint(5),
+    b(Act::ClearWhatIf, &[ch('W')], &[Grades], "clear tried")
+        .title("Clear every score tried on this course")
+        .menu('W', Group::Here),
+    b(Act::InputDone, &[ENTER], &[WhatIfInput], "try it")
+        .title("Use this score")
+        .hint(1),
+    b(Act::InputClear, &[Key::Ctrl('u')], &[WhatIfInput], "clear")
+        .title("Clear what is typed")
+        .hint(3),
+    b(Act::InputCancel, &[ESC], &[WhatIfInput], "cancel")
+        .title("Leave the score as Canvas has it")
+        .hint(4),
     // The app.
     b(Act::OpenLibrary, &[], &[Screen], "your files")
         .title("Open your canter folder")
@@ -648,7 +675,7 @@ pub const CORE: &[(Key, Act)] = &[
 pub fn typing(scopes: &[Scope]) -> bool {
     scopes
         .iter()
-        .any(|s| matches!(s, Palette | PathInput | TextInput | MenuSearch | Compose))
+        .any(|s| matches!(s, Palette | PathInput | TextInput | MenuSearch | Compose | WhatIfInput))
 }
 
 pub fn key_of(event: &KeyEvent) -> Key {
@@ -797,6 +824,7 @@ mod tests {
             vec![Screen, Page, Sections, Conversation, HasLinks],
             vec![Screen, Page, Sections, Conversation, HasLinks, Links],
             vec![Screen, List, CourseTabs],
+            vec![Screen, List, CourseTabs, Grades],
             vec![Screen, List, CourseTabs, Files],
             vec![Screen, Page, Sections],
             vec![Screen, Page, Sections, HasLinks],
@@ -819,6 +847,7 @@ mod tests {
         out.extend(signed_out);
         out.extend([
             vec![Palette],
+            vec![WhatIfInput],
             vec![PathInput],
             vec![TextInput],
             vec![Review],
