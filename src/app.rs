@@ -1842,7 +1842,7 @@ impl App {
     }
 
     /// Whether an assignment has instructor comments that have not been opened
-    /// in TUICanvas yet. Canvas is never told what has been seen.
+    /// in canter yet. Canvas is never told what has been seen.
     pub fn unseen_feedback(&self, course_id: &str, assignment_id: &str) -> bool {
         self.grades
             .get(course_id)
@@ -4425,7 +4425,7 @@ impl App {
     /// How many conversations are unread, for the home screen's widget.
     ///
     /// Canvas's own unread set, less the ones read here. Reading a
-    /// conversation in TUICanvas deliberately tells Canvas nothing, so
+    /// conversation in canter deliberately tells Canvas nothing, so
     /// Canvas's count alone would never go down as you work, and this number
     /// is allowed to disagree with the one Canvas shows for that reason.
     pub fn unread_conversations(&self) -> usize {
@@ -5988,7 +5988,7 @@ mod tests {
     #[test]
     fn hidden_courses_survive_refresh_and_restart_and_can_be_restored() {
         let root =
-            std::env::temp_dir().join(format!("tuicanvas-hidden-courses-{}", std::process::id()));
+            std::env::temp_dir().join(format!("canter-hidden-courses-{}", std::process::id()));
         let store = Arc::new(SnapshotStore::new(&root, "one"));
         let mut app = App::new("https://ufl.instructure.com", Some(store.clone()));
         let (k, r) = fetch_of(&app.start());
@@ -6342,7 +6342,7 @@ mod tests {
         // request comes back, or the box makes you wait for an answer it
         // already has; and it still has to be read, or a course you have not
         // opened in a week is searched as it was a week ago without saying so.
-        let root = std::env::temp_dir().join(format!("tuicanvas-warm-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("canter-warm-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let store = Arc::new(SnapshotStore::new(&root, "reader"));
         store.save(
@@ -6593,7 +6593,7 @@ mod tests {
 
     #[test]
     fn the_hidden_switch_is_remembered() {
-        let root = std::env::temp_dir().join(format!("tuicanvas-shid-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("canter-shid-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let store = Arc::new(SnapshotStore::new(&root, "reader"));
         let mut app = App::new(ORIGIN, Some(store.clone()));
@@ -6637,7 +6637,7 @@ mod tests {
 
     #[test]
     fn snapshot_is_shown_before_sync() {
-        let root = std::env::temp_dir().join(format!("tuicanvas-app-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("canter-app-{}", std::process::id()));
         let store = Arc::new(SnapshotStore::new(&root, "1"));
         store.save(
             &ResourceKey::Courses,
@@ -6659,7 +6659,7 @@ mod tests {
     const ORIGIN: &str = "https://ufl.instructure.com";
 
     fn temp_library(tag: &str) -> (Arc<Library>, PathBuf) {
-        let root = std::env::temp_dir().join(format!("tuicanvas-app-{tag}-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("canter-app-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         (Arc::new(Library::open(&root, "ufl.instructure.com")), root)
     }
@@ -6845,7 +6845,7 @@ mod tests {
     #[test]
     fn local_announcement_reads_survive_refresh_restart_and_stay_account_scoped() {
         let root =
-            std::env::temp_dir().join(format!("tuicanvas-local-reads-{}", std::process::id()));
+            std::env::temp_dir().join(format!("canter-local-reads-{}", std::process::id()));
         let store = Arc::new(SnapshotStore::new(&root, "reader"));
         let mut app = app_with_courses();
         app.store = Some(store.clone());
@@ -7144,7 +7144,7 @@ mod tests {
 
     #[test]
     fn conversations_read_here_are_never_reported_to_canvas() {
-        let root = std::env::temp_dir().join(format!("tuicanvas-inbox-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("canter-inbox-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let store = Arc::new(SnapshotStore::new(&root, "reader"));
         let mut app = inbox_app(None);
@@ -7421,7 +7421,7 @@ mod tests {
     #[test]
     fn announcement_snapshots_show_while_syncing_and_closed_comments_keep_links() {
         let root =
-            std::env::temp_dir().join(format!("tuicanvas-announcements-{}", std::process::id()));
+            std::env::temp_dir().join(format!("canter-announcements-{}", std::process::id()));
         let store = Arc::new(SnapshotStore::new(&root, "test"));
         let key = ResourceKey::Announcements("10".into());
         store.save(
@@ -7870,7 +7870,7 @@ mod tests {
 
     #[test]
     fn saved_tabs_are_used_at_once_and_read_again_once_per_run() {
-        let root = std::env::temp_dir().join(format!("tuicanvas-tabs-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("canter-tabs-{}", std::process::id()));
         let store = Arc::new(SnapshotStore::new(&root, "reader"));
         store.save(&tabs_key(), &vec![tab("files")], Utc::now());
         let mut app = app_with_courses();
@@ -8265,7 +8265,7 @@ mod tests {
 
     #[test]
     fn opening_graded_work_reads_the_assignment_and_clears_its_feedback_mark() {
-        let root = std::env::temp_dir().join(format!("tuicanvas-seen-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("canter-seen-{}", std::process::id()));
         let store = Arc::new(SnapshotStore::new(&root, "reader"));
         let mut app = grades_app(Some(store.clone()));
         // The midterm has instructor comments that have not been opened here.
@@ -8308,7 +8308,7 @@ mod tests {
 
     #[test]
     fn a_saved_grade_switch_fills_the_column_again_after_a_restart() {
-        let root = std::env::temp_dir().join(format!("tuicanvas-cgrades2-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("canter-cgrades2-{}", std::process::id()));
         let store = Arc::new(SnapshotStore::new(&root, "reader"));
         store.save_show_course_grades(true);
         // A restart with the switch on reads the grades of the courses listed,
@@ -8336,7 +8336,7 @@ mod tests {
 
     #[test]
     fn one_switch_shows_every_course_grade_and_the_choice_is_saved() {
-        let root = std::env::temp_dir().join(format!("tuicanvas-cgrades-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("canter-cgrades-{}", std::process::id()));
         let store = Arc::new(SnapshotStore::new(&root, "reader"));
         let mut app = app_with_courses();
         app.store = Some(store.clone());
@@ -8432,7 +8432,7 @@ mod tests {
 
     #[test]
     fn the_page_list_is_saved_and_shown_at_once() {
-        let root = std::env::temp_dir().join(format!("tuicanvas-pagelist-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("canter-pagelist-{}", std::process::id()));
         let store = Arc::new(SnapshotStore::new(&root, "reader"));
         store.save(
             &ResourceKey::Pages("10".into()),
@@ -8712,7 +8712,7 @@ mod tests {
 
     #[test]
     fn typed_text_can_come_from_a_file_and_an_empty_entry_is_refused() {
-        let dir = std::env::temp_dir().join(format!("tuicanvas-app-text-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("canter-app-text-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let answer = dir.join("answer.txt");
         std::fs::write(&answer, "Line one.\nLine two.\n").unwrap();

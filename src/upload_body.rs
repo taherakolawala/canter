@@ -94,7 +94,7 @@ mod tests {
     #[tokio::test]
     async fn streams_all_parts_in_order_with_exact_length() {
         let path =
-            std::env::temp_dir().join(format!("tuicanvas-upload-body-{}", std::process::id()));
+            std::env::temp_dir().join(format!("canter-upload-body-{}", std::process::id()));
         std::fs::write(&path, b"file bytes").unwrap();
         let file = tokio::fs::File::open(&path).await.unwrap();
         let mut body = UploadBody::new(b"prefix".to_vec(), file, 10, b"suffix".to_vec()).unwrap();

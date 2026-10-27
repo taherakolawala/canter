@@ -941,7 +941,7 @@ mod tests {
 
     #[test]
     fn text_read_from_a_file_must_be_utf8_and_not_empty() {
-        let dir = std::env::temp_dir().join(format!("tuicanvas-text-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("canter-text-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let good = dir.join("answer.txt");
         let empty = dir.join("empty.txt");
@@ -1060,7 +1060,7 @@ mod tests {
     #[test]
     fn validates_paths_extensions_and_duplicates_before_upload() {
         let dir =
-            std::env::temp_dir().join(format!("tuicanvas-submit-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("canter-submit-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let pdf = dir.join("my work.PDF");
         let txt = dir.join("notes.txt");
@@ -1136,7 +1136,7 @@ mod tests {
     #[test]
     fn suggests_paths_and_completes_selected_directory_or_file() {
         let root =
-            std::env::temp_dir().join(format!("tuicanvas-path-suggestions-{}", std::process::id()));
+            std::env::temp_dir().join(format!("canter-path-suggestions-{}", std::process::id()));
         std::fs::create_dir_all(root.join("Course Files")).unwrap();
         std::fs::create_dir_all(root.join(".hidden-folder")).unwrap();
         std::fs::write(root.join("coursework.PDF"), b"pdf").unwrap();

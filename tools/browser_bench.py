@@ -68,7 +68,7 @@ def find_targets(course_needle, assignment_needle):
 
     saved = load_session()
     if not saved:
-        raise SystemExit("No saved session. Sign in first (run tuicanvas, or python -m tools.terminal_login).")
+        raise SystemExit("No saved session. Sign in first (run canter, or python -m tools.terminal_login).")
     client = NativeCanvas(saved["browser_state"])
 
     def get(path):

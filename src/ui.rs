@@ -457,7 +457,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 let text = vec![
                     Line::raw(""),
                     Line::styled(
-                        "Canvas shows none of the sections TUICanvas has for this course.",
+                        "Canvas shows none of the sections canter has for this course.",
                         theme::muted(),
                     ),
                     Line::styled("Press o to open the course in the browser.", theme::muted()),
@@ -4767,7 +4767,7 @@ mod tests {
     }
 }
 
-/// Writes colour previews of each screen as HTML when TUICANVAS_PREVIEW is set
+/// Writes colour previews of each screen as HTML when CANTER_PREVIEW is set
 /// (development aid; run with `cargo test preview -- --ignored`).
 #[cfg(test)]
 mod preview {
@@ -4860,7 +4860,7 @@ mod preview {
     #[test]
     #[ignore]
     fn preview() {
-        let Some(path) = std::env::var_os("TUICANVAS_PREVIEW") else {
+        let Some(path) = std::env::var_os("CANTER_PREVIEW") else {
             return;
         };
         let now = Utc::now();
@@ -4939,7 +4939,7 @@ mod preview {
         page += &html(&mut app, 104, 9);
         // The assignment, with its files & links list. A temporary library
         // shows each local state: saved, not saved, downloading.
-        let root = std::env::temp_dir().join(format!("tuicanvas-preview-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("canter-preview-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let lib = std::sync::Arc::new(crate::library::Library::open(&root, "ufl.instructure.com"));
         app.library = Some(lib.clone());

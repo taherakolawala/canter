@@ -1,4 +1,4 @@
-# Build/test/smoke tasks for TUICanvas. Run directly, e.g.:
+# Build/test/smoke tasks for canter. Run directly, e.g.:
 #   powershell -ExecutionPolicy Bypass -File scripts\check.ps1 -Tasks "build test smoke"
 # Writes .tools\dev\result-<id>.log. Live tasks are read-only and never print secrets.
 param([string]$Id = 'manual', [string]$Tasks = 'build test')
@@ -11,7 +11,7 @@ $log = Join-Path $dev "result-$Id.log"
 $cargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 if (($env:Path -split ';') -notcontains $cargoBin) { $env:Path = "$cargoBin;$env:Path" }
 $env:CARGO_TERM_COLOR = 'never'
-"TUICanvas check #$Id  tasks: $Tasks  started $(Get-Date -Format o)" | Set-Content $log -Encoding utf8
+"canter check #$Id  tasks: $Tasks  started $(Get-Date -Format o)" | Set-Content $log -Encoding utf8
 
 function Step([string]$label, [scriptblock]$command) {
     "`n=== $label ===" | Add-Content $log -Encoding utf8
@@ -24,7 +24,7 @@ function Step([string]$label, [scriptblock]$command) {
     return $code
 }
 
-$exe = Join-Path $root 'target\release\tuicanvas.exe'
+$exe = Join-Path $root 'target\release\canter.exe'
 $python = Join-Path $root '.venv\Scripts\python.exe'
 $final = 0
 foreach ($task in ($Tasks -split ' ')) {

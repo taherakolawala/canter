@@ -15,7 +15,7 @@
 //! Sharper protocols (sixel, kitty graphics) are detected but not drawn; see
 //! `protocol` and `docs/architecture.md` for why.
 //!
-//! The setting `TUICANVAS_IMAGES=off` turns images off, which leaves the
+//! The setting `CANTER_IMAGES=off` turns images off, which leaves the
 //! `[n]` marks exactly as they were before this module existed. `NO_COLOR`
 //! turns them off too, since half blocks are nothing but colour.
 
@@ -34,9 +34,9 @@ use crate::html::{Link, Target};
 const UPPER_HALF: char = '\u{2580}';
 
 /// Environment variable that turns images off.
-pub const SETTING_ENV: &str = "TUICANVAS_IMAGES";
+pub const SETTING_ENV: &str = "CANTER_IMAGES";
 /// Environment variable that forces a protocol, for trying one out.
-pub const PROTOCOL_ENV: &str = "TUICANVAS_IMAGE_PROTOCOL";
+pub const PROTOCOL_ENV: &str = "CANTER_IMAGE_PROTOCOL";
 
 /// Widest box, in text cells, whatever the page width.
 const MAX_COLS: u16 = 72;
@@ -466,7 +466,7 @@ mod tests {
     }
 
     fn temp_file(tag: &str, bytes: &[u8]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tuicanvas-images-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("canter-images-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join(tag);
         std::fs::write(&path, bytes).expect("write");
@@ -672,7 +672,7 @@ mod tests {
         // The whole path, end to end: a mark, a link that is an image, and a
         // file on disk under that id. Everything below this was tested
         // separately, and a page still showed nothing.
-        let root = std::env::temp_dir().join(format!("tuicanvas-place-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("canter-place-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let library = crate::library::Library::open(&root, "ufl.instructure.com");
         let downloaded = temp_file("place", &two_tone_png(8, 8));
@@ -691,7 +691,7 @@ mod tests {
         let lines = vec!["[image: chart][1]".to_string(), "after".to_string()];
         let body = place(lines.clone(), &[link(true, "33")], Some(&library), 60);
         if !enabled() {
-            // `NO_COLOR` or `TUICANVAS_IMAGES=off` in whoever's environment is
+            // `NO_COLOR` or `CANTER_IMAGES=off` in whoever's environment is
             // running this. The switch itself is checked above; what this test
             // can still require is that the text is left exactly as it was.
             assert_eq!(body.lines, lines);
@@ -769,7 +769,7 @@ mod tests {
             return;
         }
         let root = std::env::temp_dir().join(format!(
-            "tuicanvas-images-lib-{}-{}",
+            "canter-images-lib-{}-{}",
             std::process::id(),
             "place"
         ));

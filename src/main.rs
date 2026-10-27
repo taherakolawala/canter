@@ -1,4 +1,4 @@
-//! TUICanvas: a keyboard-driven terminal interface for Canvas.
+//! canter: a keyboard-driven terminal interface for Canvas.
 
 mod announcements;
 mod api;
@@ -35,29 +35,29 @@ mod ui;
 mod upload_body;
 mod ws;
 
-const HELP: &str = "TUICanvas — terminal Canvas interface
+const HELP: &str = "canter — terminal Canvas interface
 
 Usage:
-  tuicanvas                 Open the reader (signs in first if needed)
-  tuicanvas --diag          Also log request timings to the data folder
-  tuicanvas --login [--window | --python] [--show-password] [--fresh] [--chrome]
-                            Sign in again. By default TUICanvas drives Edge in
-                            the background; --window opens a small sign-in
-                            window you drive; --python runs the old helper
-  tuicanvas --logout        Delete the saved session and this account's saved copies
-  tuicanvas --smoke [--course NAME] [--assignment NAME]
-                            Read-only live check; writes benchmarks/private/smoke.json
-  tuicanvas --dump DIR [--course NAME] [--assignment NAME]
-                            Headless walk-through; writes rendered screens to DIR
-  tuicanvas --bench [N] [--cold | --warm] [--terminal] [--course NAME] [--assignment NAME]
-                            Time the workflow N times (default 10) for each condition;
-                            writes benchmarks/private/tui-bench*.json
+  canter                 Open the reader (signs in first if needed)
+  canter --diag          Also log request timings to the data folder
+  canter --login [--window | --python] [--show-password] [--fresh] [--chrome]
+                         Sign in again. By default canter drives Edge in
+                         the background; --window opens a small sign-in
+                         window you drive; --python runs the old helper
+  canter --logout        Delete the saved session and this account's saved copies
+  canter --smoke [--course NAME] [--assignment NAME]
+                         Read-only live check; writes benchmarks/private/smoke.json
+  canter --dump DIR [--course NAME] [--assignment NAME]
+                         Headless walk-through; writes rendered screens to DIR
+  canter --bench [N] [--cold | --warm] [--terminal] [--course NAME] [--assignment NAME]
+                         Time the workflow N times (default 10) for each condition;
+                         writes benchmarks/private/tui-bench*.json
 
-Keys: arrows/jk move, Enter open, Esc back, / filter, r refresh,
+Keys: arrows/jk move, Enter open, Esc back, / search, r refresh,
       s/t/u submit files, text or a URL from an assignment,
       o open in browser, L sign in, q quit
-Env:  TUICANVAS_ORIGIN (default https://ufl.instructure.com), TUICANVAS_HOME,
-      TUICANVAS_SIGNIN (background | window | python), TUICANVAS_BROWSER";
+Env:  CANTER_ORIGIN (default https://ufl.instructure.com), CANTER_HOME,
+      CANTER_SIGNIN (background | window | python), CANTER_BROWSER";
 
 fn value_after(args: &[String], flag: &str) -> Option<String> {
     args.iter()

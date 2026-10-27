@@ -84,7 +84,7 @@ impl ReqwestTransport {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .pool_idle_timeout(Duration::from_secs(90))
-            .user_agent(concat!("TUICanvas/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("canter/", env!("CARGO_PKG_VERSION")))
             .https_only(true)
             .build()
             .map_err(|_| "Could not initialise the HTTPS client.".to_string())?;

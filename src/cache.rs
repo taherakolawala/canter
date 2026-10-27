@@ -187,7 +187,7 @@ impl SnapshotStore {
         self.save_named("local-announcement-reads.json", reads, Utc::now());
     }
 
-    /// Instructor comments already seen in TUICanvas, by course and
+    /// Instructor comments already seen in canter, by course and
     /// assignment. Canvas is never told what has been read.
     pub fn seen_feedback(&self) -> std::collections::BTreeSet<(String, String)> {
         self.load_named("local-seen-feedback.json")
@@ -223,7 +223,7 @@ impl SnapshotStore {
         self.save_named("local-search-hidden.json", &on, Utc::now());
     }
 
-    /// Conversations read in TUICanvas. Canvas is never told, so this is the
+    /// Conversations read in canter. Canvas is never told, so this is the
     /// only record of it and it is kept apart from refreshed snapshots.
     pub fn conversation_reads(&self) -> std::collections::BTreeSet<String> {
         self.load_named("local-conversation-reads.json")
@@ -288,7 +288,7 @@ mod tests {
     use super::*;
 
     fn temp_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tuicanvas-test-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("canter-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

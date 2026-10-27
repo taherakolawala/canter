@@ -451,7 +451,7 @@ impl Input {
 pub fn run_login_helper(config: &Config) -> Result<(), String> {
     let (python, dir) = config.login_helper().ok_or_else(|| {
         format!(
-            "Sign-in helper not found under {}. Set TUICANVAS_HOME to the project folder.",
+            "Sign-in helper not found under {}. Set CANTER_HOME to the project folder.",
             config.project_dir.display()
         )
     })?;
@@ -467,7 +467,7 @@ pub fn run_login_helper(config: &Config) -> Result<(), String> {
     }
 }
 
-/// Sign in the configured way: TUICanvas driving a browser itself, or the
+/// Sign in the configured way: canter driving a browser itself, or the
 /// Python helper when that is asked for.
 pub fn sign_in(
     config: &Config,
@@ -572,7 +572,7 @@ fn setup(config: &Config, options: &Options, interactive_login: bool) -> Result<
     } else {
         SessionFile::load(&config.session_path(), &config.origin)
             .map_err(|e| e.0)?
-            .ok_or("No saved session; run tuicanvas once to sign in.")?
+            .ok_or("No saved session; run canter once to sign in.")?
     };
     let account = account_of(config, &mut session)?;
     let diag = Arc::new(Diagnostics::new(options.diag_file.clone()));

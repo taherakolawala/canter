@@ -2,7 +2,7 @@
 
 A fast, keyboard-driven terminal interface for [Canvas LMS](https://www.instructure.com/canvas), built first for the University of Florida's Canvas (`ufl.instructure.com`).
 
-The Canvas web page for one assignment makes 183 requests (1.4 MB) before the assignment shows up. TUICanvas skips the web app and makes only the reads each screen needs:
+The Canvas web page for one assignment makes 183 requests (1.4 MB) before the assignment shows up. canter skips the web app and makes only the reads each screen needs:
 
 ```
 Canvas › GPU Computing                                          Updated 4:54 PM
@@ -18,16 +18,18 @@ Current progress, known issues and next steps: [docs/status.md](docs/status.md).
 It covers sign in (GatorLink + Duo) → course list → assignment list → assignment details (deadline, submission status, description), course files, and announcements.
 
 - Every screen shows a saved copy right away, with **Syncing…** at the top while it fetches fresh data. If the fetch fails, the screen says **Outdated** instead of pretending the old copy is current.
-- **Files.** Each course has a Files tab that mirrors its Canvas folders, and each assignment lists its attachments and links. Files download into `C:\Users\<you>\TUICanvas\<course>\Class Files` or `Assignment Files\<assignment>` and open in their default app. A file used in both places is stored once.
+- **Files.** Each course has a Files tab that mirrors its Canvas folders, and each assignment lists its attachments and links. Files download into `C:\Users\<you>\canter\<course>\Class Files` or `Assignment Files\<assignment>` and open in their default app. A file used in both places is stored once.
 - **Announcements.** A per-course tab lists all announcements newest-first, with author, posting date and Canvas read status. Open one to read its message and attachments; replies open in the browser. Opening a readable message marks it Read locally in the TUI, remembered across restarts. Canvas read status is unchanged. Files are fetched only when you choose them and go in `Announcement Files\<announcement-id>`.
 - File submissions are available from an assignment that accepts uploads. Text entry, modules, pages and discussions open in the browser for now. Quizzes and assessments are out of scope (see `docs/build-plan.md`).
-- To use a separate Canvas site such as Canvas Lite, set `TUICANVAS_ORIGIN` to its HTTPS origin before launching. Its sign-in opens a visible browser and saves a separate, protected session.
+- To use a separate Canvas site such as Canvas Lite, set `CANTER_ORIGIN` to its HTTPS origin before launching. Its sign-in opens a visible browser and saves a separate, protected session.
 
 ## How sign-in works
 
 Personal access tokens aren't used. A small helper (`tools/terminal_login.py`) runs the normal UF login in a hidden Microsoft Edge window. You type your GatorLink username and password and approve Duo, all inside the terminal.
 
-The resulting session is encrypted with Windows DPAPI for your Windows user and stored at `%LOCALAPPDATA%\TUICanvas\ufl.session.dpapi`. Later runs reuse it without a browser until Canvas or UF expire it.
+The resulting session is encrypted with Windows DPAPI for your Windows user and stored at `%LOCALAPPDATA%\canter\ufl.session.dpapi`. Later runs reuse it without a browser until Canvas or UF expire it.
+
+The program was called TUICanvas until 2026-10-27. If a folder from that name is still there, the first run moves it across — the saved session, the saved copies and the file library — so nothing has to be signed in or downloaded again. A folder already under the new name is never overwritten.
 
 Passwords are never saved or logged.
 
@@ -46,18 +48,18 @@ py -m venv .venv
 
 # Build and run
 cargo build --release
-target\release\tuicanvas.exe
+target\release\canter.exe
 ```
 
 ## Usage
 
 ```
-tuicanvas                 Open the reader (signs in first if needed)
-tuicanvas --login         Sign in again
-tuicanvas --logout        Delete the saved session and this account's saved copies
-tuicanvas --diag          Log request timings (no content) to the data folder
-tuicanvas --smoke         Read-only live check -> benchmarks/private/smoke.json
-tuicanvas --bench [N]     Time the workflow N times -> benchmarks/private/tui-bench.json
+canter                 Open the reader (signs in first if needed)
+canter --login         Sign in again
+canter --logout        Delete the saved session and this account's saved copies
+canter --diag          Log request timings (no content) to the data folder
+canter --smoke         Read-only live check -> benchmarks/private/smoke.json
+canter --bench [N]     Time the workflow N times -> benchmarks/private/tui-bench.json
 ```
 
 | Key | Action |
@@ -70,7 +72,7 @@ tuicanvas --bench [N]     Time the workflow N times -> benchmarks/private/tui-be
 | `Esc` / `←` / Backspace | Back (or clear the filter or selection) |
 | `Tab` / `Shift+Tab` | In a course: cycle Assignments, Files and Announcements forward/backward. In an assignment or announcement: select the next/previous file or link (`1`–`9` jump to one) |
 | `d` / `D` | Download the selected file (or folder) / everything here |
-| `e` | Show the file or its folder in File Explorer (on the course list: your TUICanvas folder) |
+| `e` | Show the file or its folder in File Explorer (on the course list: your canter folder) |
 | `/` | Filter the current list (in Files: search the whole course) |
 | `r` | Refresh now |
 | `o` | Open the current item, or the selected link, in your browser |
@@ -91,5 +93,5 @@ tuicanvas --bench [N]     Time the workflow N times -> benchmarks/private/tui-be
 
 - Raw HAR captures, session files and private reports are ignored by git.
 - Diagnostics record only endpoint templates, statuses, sizes and timings. They never record URLs with IDs, cookies or response bodies.
-- Saved copies of course data live under `%LOCALAPPDATA%\TUICanvas\cache`, separated by Canvas origin and account.
-- Downloaded files live in `%USERPROFILE%\TUICanvas` (set `TUICANVAS_LIBRARY` to move it). Canvas cookies are sent only to Canvas, never to its file storage hosts.
+- Saved copies of course data live under `%LOCALAPPDATA%\canter\cache`, separated by Canvas origin and account.
+- Downloaded files live in `%USERPROFILE%\canter` (set `CANTER_LIBRARY` to move it). Canvas cookies are sent only to Canvas, never to its file storage hosts.

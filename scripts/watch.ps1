@@ -11,7 +11,7 @@ $lastFile = Join-Path $dev 'last-processed.txt'
 $status = Join-Path $dev 'status.txt'
 $last = if (Test-Path $lastFile) { (Get-Content $lastFile -Raw).Trim() } else { '' }
 "idle $last" | Set-Content $status
-Write-Host "TUICanvas watcher running in $root (Ctrl+C to stop)" -ForegroundColor Cyan
+Write-Host "canter watcher running in $root (Ctrl+C to stop)" -ForegroundColor Cyan
 while ($true) {
     $line = ''
     if (Test-Path $request) { $line = "$(Get-Content $request -Raw -ErrorAction SilentlyContinue)".Trim() }

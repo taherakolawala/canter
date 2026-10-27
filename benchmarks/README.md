@@ -1,6 +1,6 @@
 # Canvas baseline capture
 
-Status: the end-to-end baseline is recorded in [baseline-2026-10-20.md](baseline-2026-10-20.md), produced by `tools/browser_bench.py` and `tuicanvas --bench`. The manual DevTools capture method below is still useful when a full performance trace is wanted.
+Status: the end-to-end baseline is recorded in [baseline-2026-10-20.md](baseline-2026-10-20.md), produced by `tools/browser_bench.py` and `canter --bench`. The manual DevTools capture method below is still useful when a full performance trace is wanted.
 
 ## Selected workflow
 

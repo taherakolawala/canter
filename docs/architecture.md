@@ -1,13 +1,13 @@
 # Architecture
 
-How TUICanvas works today: the pieces, how a screen gets its data, how sign-in works, and which optimizations are in place. Progress and next steps are tracked separately in [status.md](status.md); every network read is justified in [request-policy.md](request-policy.md).
+How canter works today: the pieces, how a screen gets its data, how sign-in works, and which optimizations are in place. Progress and next steps are tracked separately in [status.md](status.md); every network read is justified in [request-policy.md](request-policy.md).
 
-TUICanvas has two programs:
+canter has two programs:
 
-- **`tuicanvas.exe` (Rust).** The reader you use. It draws the terminal UI and makes read-only Canvas API calls directly over HTTPS. It never loads the Canvas web app. It also downloads course files into a folder on your PC (the file library) and opens them in their default apps.
+- **`canter.exe` (Rust).** The reader you use. It draws the terminal UI and makes read-only Canvas API calls directly over HTTPS. It never loads the Canvas web app. It also downloads course files into a folder on your PC (the file library) and opens them in their default apps.
 - **The sign-in helper (Python, `tools/terminal_login.py`).** It runs only when a session is missing or expired. It drives UF's normal GatorLink + Duo login in a hidden Microsoft Edge window from the terminal, checks the result, and saves the session for the reader.
 
-The two share one file: the session, encrypted with Windows DPAPI at `%LOCALAPPDATA%\TUICanvas\ufl.session.dpapi`.
+The two share one file: the session, encrypted with Windows DPAPI at `%LOCALAPPDATA%\canter\ufl.session.dpapi`.
 
 The course list also has a local edit mode. Its hidden course IDs are kept in the origin and account scoped snapshot directory, separate from Canvas course data. A Canvas refresh cannot reset the user's home screen choices; editing adds no network reads.
 
@@ -16,7 +16,7 @@ The course list also has a local edit mode. Its hidden course IDs are kept in th
 ```mermaid
 flowchart LR
     user(["You, in a terminal"])
-    subgraph app["tuicanvas.exe (Rust)"]
+    subgraph app["canter.exe (Rust)"]
         input["Input thread<br/>crossterm"]
         state["App state<br/>app.rs"]
         ui["Renderer<br/>ui.rs + Ratatui"]
@@ -26,7 +26,7 @@ flowchart LR
         diag["Diagnostics<br/>diag.rs"]
         dl["Downloader<br/>download.rs, up to 2 at once"]
     end
-    lib[("File library<br/>%USERPROFILE%\TUICanvas")]
+    lib[("File library<br/>%USERPROFILE%\canter")]
     winapps["Default Windows apps,<br/>File Explorer"]
     storage["Canvas file storage<br/>canvas-user-content.com,<br/>inscloudgate.net"]
     subgraph helper["Sign-in helper (Python)"]
@@ -65,13 +65,13 @@ flowchart LR
 | Piece | File(s) | Responsibility |
 | --- | --- | --- |
 | Entry point | `src/main.rs` | Command-line options: reader, `--login`, `--logout`, `--diag`, `--smoke`, `--dump` |
-| Configuration | `src/config.rs` | Canvas origin (default `https://ufl.instructure.com`, override with `TUICANVAS_ORIGIN`); data, session and cache paths; finding the sign-in helper |
+| Configuration | `src/config.rs` | Canvas origin (default `https://ufl.instructure.com`, override with `CANTER_ORIGIN`); data, session and cache paths; finding the sign-in helper |
 | Session | `src/session.rs`, `src/protect.rs` | Decrypt and encrypt the shared session with DPAPI, preserving every field the helper wrote. A small cookie jar matches domain, path and expiry, and absorbs `Set-Cookie` rotations. It also extracts the CSRF token. |
 | Transport | `src/transport.rs` | One pooled `reqwest` client: HTTPS only, no redirects, timeouts, gzip, HTTP/2 when the server offers it, 16 MB response cap. Behind a trait so tests use a scripted fake. |
 | Canvas client | `src/canvas.rs` | Allowlisted paths, cookies and CSRF, error classification, throttling back-off, pagination, GraphQL error handling |
 | Reads | `src/api.rs` | The reviewed read operations: courses (REST), assignment list (GraphQL with REST fallback), assignment detail (REST), a course's folders and files (REST), one file's details (REST), profile |
 | Model | `src/model.rs` | Typed courses, assignments, submissions, files and folders; the status shown for each assignment (Missing, Submitted late, Graded 9/10, …) |
-| File library | `src/library.rs` | The folder tree under `%USERPROFILE%\TUICanvas`, Windows-safe names, one stored copy per Canvas file shown in several places through hard links, an index of versions and last use, and the 30-day clean-up of automatic image downloads |
+| File library | `src/library.rs` | The folder tree under `%USERPROFILE%\canter`, Windows-safe names, one stored copy per Canvas file shown in several places through hard links, an index of versions and last use, and the 30-day clean-up of automatic image downloads |
 | Downloads | `src/download.rs` | Follows Canvas's redirects by hand: cookies only to the Canvas origin, then only to Canvas's two storage domains over HTTPS. Streams to a partial file, checks the length, 2 GB cap. |
 | Saved copies | `src/cache.rs` | Versioned JSON snapshots per Canvas origin and account, written atomically |
 | Keyboard | `src/keys.rs` | Every action declared once: its keys, the screens it applies to, its hint-line label and its letter in the actions menu. Key handling, the hint line, the `?` help screen and the `Space` menu are all generated from it. |
@@ -175,7 +175,7 @@ GraphQL responses that contain any `errors` entry fail the whole read, so a part
 sequenceDiagram
     autonumber
     actor You
-    participant App as tuicanvas
+    participant App as canter
     participant H as Sign-in helper
     participant B as Headless Edge
     participant UF as UF login
@@ -234,7 +234,7 @@ flowchart LR
 ```
 
 - **One meaning per key.** `↑↓` move, `Enter` open, `Esc` back, `Tab` next tab or section, `/` search, `r` refresh, `o` browser, `Space` actions, `?` help and `q` quit mean the same wherever they work. Text boxes are the exception: letters are text there, and `Tab` completes a path.
-- **The actions menu** lists what applies to the selection and the screen, grouped, each with the letter that runs it; `/` searches it. Rare actions (hide a course, show hidden courses, open the TUICanvas folder, sign in again) are only in the menu, so they take no key of their own.
+- **The actions menu** lists what applies to the selection and the screen, grouped, each with the letter that runs it; `/` searches it. Rare actions (hide a course, show hidden courses, open the canter folder, sign in again) are only in the menu, so they take no key of their own.
 - **Pages have sections, not modes.** An assignment or announcement is one scrolling page: details, text, files & links, and (assignments) past submissions. `Tab` moves the focus between sections; `↑↓` then act on the focused one; `Esc` returns to the text.
 - **Checked by tests.** No key may do two things in one place; core keys may not change meaning; menu letters are unique on every screen; every action can be triggered; the hint line fits 80 columns and always ends with `Space actions` and `? help`.
 
@@ -243,13 +243,13 @@ flowchart LR
 Course files live in an ordinary folder you can browse in File Explorer:
 
 ```text
-C:\Users\<you>\TUICanvas\
+C:\Users\<you>\canter\
 ├── EEL5934 Introduction to GPU Computing\
 │   ├── Class Files\              the course's Files area, same folders as Canvas
 │   │   └── Slides\mod-1-intro-accessible.pdf
 │   └── Assignment Files\
 │       └── Lab-2 Assignment\     attachments and images of that assignment
-└── .tuicanvas\                   index (versions, paths, last use) and partial downloads
+└── .canter\                   index (versions, paths, last use) and partial downloads
 ```
 
 - **Where you find files.** Each course has tabs for **Assignments**, **Files** and **Announcements** (`Tab` switches). Files shows the course's folders as Canvas has them; one listing read covers the whole course, so moving between folders and searching (`/`, across all folders) needs no further reads. Each assignment has a **Files & links** list under its description, numbered like the links in the text.
@@ -283,7 +283,7 @@ sequenceDiagram
         Ex->>API: GET file address with Canvas cookies
         API-->>Ex: 302 to canvas-user-content.com
         Ex->>S: follow redirects without cookies (signed address)
-        S-->>Ex: file contents, streamed to .tuicanvas\partial
+        S-->>Ex: file contents, streamed to .canter\partial
         Ex->>Lib: mark as downloaded from the internet, install (move or overwrite in place)
         Ex->>App: Done, with progress along the way
         App-->>You: open in the default app
@@ -333,7 +333,7 @@ sequenceDiagram
 | Images fetched with the assignment | `app.rs` | Opening an image later needs no wait |
 | Release build tuning | `Cargo.toml` | Thin LTO; debug info stripped |
 
-Sizes are of the decompressed JSON bodies. Timings come from `tuicanvas --smoke` runs on one account and home connection (see [request-policy.md](request-policy.md)).
+Sizes are of the decompressed JSON bodies. Timings come from `canter --smoke` runs on one account and home connection (see [request-policy.md](request-policy.md)).
 
 ## Not applied yet
 
@@ -356,10 +356,10 @@ Sizes are of the decompressed JSON bodies. Timings come from `tuicanvas --smoke`
 | Tool | Use |
 | --- | --- |
 | `cargo test`, `python -m unittest tools.test_*` | Unit tests with a scripted transport, synthetic sessions and replayed Duo screens; no network, credentials or MFA |
-| `tuicanvas --smoke` | Live read-only verification and measurement → `benchmarks/private/smoke.json`. Includes a course's Files listing, access to every file linked from its assignments, and one download into a scratch library with a hard-link check. |
-| `tuicanvas --dump DIR` | Walks courses → course → assignment → Files tab → a folder headlessly, downloads the smallest file there into a scratch library through the same path the reader uses, and writes each rendered screen as text, with render and sync timings |
-| `tuicanvas --diag` | Logs every request (template, status, size, timing) and every frame to `%LOCALAPPDATA%\TUICanvas\diagnostics.jsonl`. Frames: startup to first frame, each key to its frame, and each read from the action that caused it to the frame showing its data, split into network, parse and response-to-frame. Also logs CPU and peak memory at exit. |
-| `tuicanvas --bench N` | Runs start → course list → course → assignment → back N times, cold and warm, on an in-memory screen (or `--terminal` for a real console). Uses a private snapshot folder. Writes `benchmarks/private/tui-bench*.json`. |
+| `canter --smoke` | Live read-only verification and measurement → `benchmarks/private/smoke.json`. Includes a course's Files listing, access to every file linked from its assignments, and one download into a scratch library with a hard-link check. |
+| `canter --dump DIR` | Walks courses → course → assignment → Files tab → a folder headlessly, downloads the smallest file there into a scratch library through the same path the reader uses, and writes each rendered screen as text, with render and sync timings |
+| `canter --diag` | Logs every request (template, status, size, timing) and every frame to `%LOCALAPPDATA%\canter\diagnostics.jsonl`. Frames: startup to first frame, each key to its frame, and each read from the action that caused it to the frame showing its data, split into network, parse and response-to-frame. Also logs CPU and peak memory at exit. |
+| `canter --bench N` | Runs start → course list → course → assignment → back N times, cold and warm, on an in-memory screen (or `--terminal` for a real console). Uses a private snapshot folder. Writes `benchmarks/private/tui-bench*.json`. |
 | `tools/browser_bench.py` | The same workflow on the Canvas website in headless Edge with the saved session. Content-visible time is taken from the page's own clock; requests and transferred bytes are counted with DevTools Protocol events. Writes `benchmarks/private/browser-bench.json`. |
 | `scripts/check.ps1`, `scripts/watch.ps1` | Build, test, live checks and git tasks on Windows, on request |
 
@@ -423,11 +423,11 @@ the text and once where it draws a body line.
 
 ### The setting
 
-`TUICANVAS_IMAGES=off` (also `0`, `no`, `false`, `none`) turns images off
+`CANTER_IMAGES=off` (also `0`, `no`, `false`, `none`) turns images off
 entirely, which leaves the `[n]` marks exactly as they were before this module
 existed. Anything else, including the variable being unset, leaves them on.
 `NO_COLOR` turns them off too, since half blocks are nothing but colour.
-`TUICANVAS_IMAGE_PROTOCOL=halfblock|sixel|kitty` forces a protocol instead of
+`CANTER_IMAGE_PROTOCOL=halfblock|sixel|kitty` forces a protocol instead of
 detecting one, for trying one out; `auto` and anything else mean "detect".
 
 ### Detection and the sharper protocols

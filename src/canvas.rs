@@ -341,7 +341,7 @@ impl CanvasClient {
             return Err(CanvasError::Invalid("unsafe upload URL"));
         }
         let boundary = format!(
-            "tuicanvas-{}-{}",
+            "canter-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

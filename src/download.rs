@@ -84,7 +84,7 @@ impl Downloader {
             .connect_timeout(Duration::from_secs(10))
             .read_timeout(Duration::from_secs(60))
             .https_only(true)
-            .user_agent(concat!("TUICanvas/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("canter/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|_| "Could not initialise the download client.".to_string())?;
         Ok(Downloader {

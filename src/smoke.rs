@@ -67,7 +67,7 @@ pub fn run(config: &Config, opts: SmokeOptions) -> Result<i32, String> {
     let session = match SessionFile::load(&config.session_path(), &config.origin) {
         Ok(Some(s)) => s,
         Ok(None) => {
-            println!("No saved session. Sign in first (run tuicanvas, or tools/terminal_login).");
+            println!("No saved session. Sign in first (run canter, or tools/terminal_login).");
             return Ok(3);
         }
         Err(e) => return Err(e.0),

@@ -1,4 +1,4 @@
-# TUICanvas build plan
+# canter build plan
 
 Status: approved by the user on 2026-10-15 with the amendments incorporated below. Milestones 1–3 are complete; see [status.md](status.md) for current progress and next steps.
 
@@ -115,10 +115,10 @@ Approved by the user on 2026-10-21. It builds on the v1 reader and keeps every v
 
 ### Local library
 
-All files live under one folder, `C:\Users\taher\TUICanvas` by default (configurable):
+All files live under one folder, `C:\Users\taher\canter` by default (configurable):
 
 ```
-TUICanvas\
+canter\
   <course code> <course name>\
     Class Files\        mirrors the course's Canvas Files tree; only files the user chooses to download exist
     Assignment Files\

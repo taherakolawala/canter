@@ -59,9 +59,9 @@ pub fn arguments(mode: Mode, profile: &Path, url: &str) -> Vec<String> {
 }
 
 /// Where Edge and Chrome are installed on this machine, most likely first.
-/// `TUICANVAS_BROWSER` overrides the search with one exact path.
+/// `CANTER_BROWSER` overrides the search with one exact path.
 pub fn executable(channel: Channel) -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("TUICANVAS_BROWSER") {
+    if let Ok(path) = std::env::var("CANTER_BROWSER") {
         let path = PathBuf::from(path);
         return path.is_file().then_some(path);
     }

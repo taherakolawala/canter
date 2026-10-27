@@ -28,7 +28,7 @@ pub struct Config {
 impl Config {
     pub fn load() -> Result<Self, String> {
         let origin =
-            std::env::var("TUICANVAS_ORIGIN").unwrap_or_else(|_| DEFAULT_ORIGIN.to_string());
+            std::env::var("CANTER_ORIGIN").unwrap_or_else(|_| DEFAULT_ORIGIN.to_string());
         let host = parse_origin(&origin)?;
         Ok(Config {
             origin: format!("https://{host}"),
@@ -52,14 +52,16 @@ impl Config {
         self.data_dir.join("cache").join("v1").join(&self.host)
     }
 
-    /// The user's file library: `TUICANVAS_LIBRARY`, else `<home>\TUICanvas`.
+    /// The user's file library: `CANTER_LIBRARY`, else `<home>\canter`.
     pub fn library_root(&self) -> PathBuf {
-        if let Ok(dir) = std::env::var("TUICANVAS_LIBRARY") {
+        if let Ok(dir) = std::env::var("CANTER_LIBRARY") {
             return PathBuf::from(dir);
         }
-        let home = std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-            .unwrap_or_else(|_| ".".into());
-        PathBuf::from(home).join("TUICanvas")
+        let home = PathBuf::from(
+            std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                .unwrap_or_else(|_| ".".into()),
+        );
+        carried_over(home.join("TUICanvas"), home.join("canter"))
     }
 
     pub fn private_reports(&self) -> PathBuf {
@@ -73,11 +75,11 @@ impl Config {
     }
 
     /// Which sign-in path runs when nothing is asked for on the command line.
-    /// `TUICANVAS_SIGNIN` selects one; other Canvas sites get the window,
+    /// `CANTER_SIGNIN` selects one; other Canvas sites get the window,
     /// because their identity provider is unknown here.
     pub fn signin_choice(&self) -> SignIn {
         signin_choice(
-            &std::env::var("TUICANVAS_SIGNIN").unwrap_or_default(),
+            &std::env::var("CANTER_SIGNIN").unwrap_or_default(),
             &self.host,
         )
     }
@@ -126,27 +128,46 @@ pub fn parse_origin(origin: &str) -> Result<String, String> {
     }
 }
 
+/// Carry a folder over from the name this reader had before it was called
+/// canter.
+///
+/// The saved sign-in, the saved copies and every downloaded file live under a
+/// folder named after the program, so renaming the program would otherwise
+/// orphan them: the reader would ask for a password again and re-download
+/// everything, with the old folder left behind for the user to find. Moving
+/// it is one rename and happens only when there is nothing at the new name to
+/// overwrite. A rename that fails (the old folder is open elsewhere, or the
+/// two are on different drives) leaves the new name to be created empty,
+/// which is the behaviour of a fresh install rather than an error.
+pub fn carried_over(old: PathBuf, new: PathBuf) -> PathBuf {
+    if !new.exists() && old.is_dir() {
+        let _ = std::fs::rename(&old, &new);
+    }
+    new
+}
+
 fn data_dir() -> Result<PathBuf, String> {
-    if let Ok(dir) = std::env::var("TUICANVAS_DATA_DIR") {
+    if let Ok(dir) = std::env::var("CANTER_DATA_DIR") {
         return Ok(PathBuf::from(dir));
     }
     if cfg!(windows) {
-        let base =
-            std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA is unavailable".to_string())?;
-        return Ok(PathBuf::from(base).join("TUICanvas"));
+        let base = PathBuf::from(
+            std::env::var("LOCALAPPDATA").map_err(|_| "LOCALAPPDATA is unavailable".to_string())?,
+        );
+        return Ok(carried_over(base.join("TUICanvas"), base.join("canter")));
     }
     if let Ok(base) = std::env::var("XDG_DATA_HOME") {
-        return Ok(PathBuf::from(base).join("tuicanvas"));
+        let base = PathBuf::from(base);
+        return Ok(carried_over(base.join("tuicanvas"), base.join("canter")));
     }
-    let home = std::env::var("HOME").map_err(|_| "HOME is unavailable".to_string())?;
-    Ok(PathBuf::from(home)
+    let share = PathBuf::from(std::env::var("HOME").map_err(|_| "HOME is unavailable".to_string())?)
         .join(".local")
-        .join("share")
-        .join("tuicanvas"))
+        .join("share");
+    Ok(carried_over(share.join("tuicanvas"), share.join("canter")))
 }
 
 fn project_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("TUICANVAS_HOME") {
+    if let Ok(dir) = std::env::var("CANTER_HOME") {
         return PathBuf::from(dir);
     }
     let marker = |dir: &Path| dir.join("tools").join("terminal_login.py").is_file();
@@ -195,5 +216,36 @@ mod tests {
             signin_choice("headless", "canvas.example.edu"),
             SignIn::Background
         );
+    }
+
+    #[test]
+    fn the_old_folder_is_carried_over_only_when_the_new_one_is_absent() {
+        let root = std::env::temp_dir().join(format!("canter-carry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (old, new) = (root.join("TUICanvas"), root.join("canter"));
+        // Nothing to carry over: the new name is simply the answer.
+        assert_eq!(carried_over(old.clone(), new.clone()), new);
+        assert!(!new.exists(), "nothing is created before it is needed");
+        // A saved sign-in under the old name moves across, file and all.
+        std::fs::create_dir_all(old.join("cache")).expect("the old folder");
+        std::fs::write(old.join("ufl.session.dpapi"), b"session").expect("a session");
+        assert_eq!(carried_over(old.clone(), new.clone()), new);
+        assert!(!old.exists(), "the old folder is not left behind");
+        assert_eq!(
+            std::fs::read(new.join("ufl.session.dpapi")).expect("the session"),
+            b"session"
+        );
+        assert!(new.join("cache").is_dir());
+        // With both names in place the new one is left alone: a folder of
+        // saved copies is never overwritten by an older one.
+        std::fs::create_dir_all(&old).expect("the old folder again");
+        std::fs::write(old.join("ufl.session.dpapi"), b"older").expect("an older session");
+        assert_eq!(carried_over(old.clone(), new.clone()), new);
+        assert_eq!(
+            std::fs::read(new.join("ufl.session.dpapi")).expect("the session"),
+            b"session"
+        );
+        assert!(old.is_dir(), "and the old one is left for the user to see");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

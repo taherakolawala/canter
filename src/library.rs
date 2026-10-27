@@ -1,5 +1,5 @@
-//! The local file library: `TUICanvas\<course>\Class Files\...` and
-//! `TUICanvas\<course>\Assignment Files\<assignment>\...`.
+//! The local file library: `canter\<course>\Class Files\...` and
+//! `canter\<course>\Assignment Files\<assignment>\...`.
 //!
 //! Each Canvas file is stored once. A file referenced from more than one place
 //! appears in each through an NTFS hard link (same data, several names); if
@@ -178,11 +178,13 @@ pub fn class_folder_parts(full_name: &str) -> Vec<String> {
 }
 
 impl Library {
-    /// `root` is the TUICanvas folder; the index is per Canvas host.
+    /// `root` is the canter folder; the index is per Canvas host.
     pub fn open(root: &Path, host: &str) -> Self {
-        let index_path = root
-            .join(".tuicanvas")
-            .join(format!("index-{}.json", safe_name(host)));
+        // The index folder is named after the program too, and the library it
+        // sits in may have been carried over from the old name with the old
+        // folder inside it.
+        let index_dir = crate::config::carried_over(root.join(".tuicanvas"), root.join(".canter"));
+        let index_path = index_dir.join(format!("index-{}.json", safe_name(host)));
         let index = std::fs::read(&index_path)
             .ok()
             .and_then(|b| serde_json::from_slice::<Index>(&b).ok())
@@ -215,7 +217,7 @@ impl Library {
 
     /// Where partial downloads are written: on the same drive, so finishing is a rename.
     pub fn temp_dir(&self) -> PathBuf {
-        self.root.join(".tuicanvas").join("partial")
+        self.root.join(".canter").join("partial")
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Index> {
@@ -441,7 +443,7 @@ mod tests {
     use super::*;
 
     fn temp_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("tuicanvas-lib-{tag}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("canter-lib-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

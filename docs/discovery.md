@@ -1,4 +1,4 @@
-# TUICanvas discovery
+# canter discovery
 
 ## Agreed direction
 

@@ -177,7 +177,7 @@ impl Group {
         match self {
             Group::Selected => "Selected",
             Group::Here => "This screen",
-            Group::App => "TUICanvas",
+            Group::App => "canter",
         }
     }
 }
@@ -510,7 +510,7 @@ pub static BINDINGS: &[Binding] = &[
         .menu('g', Group::Here),
     // The app.
     b(Act::OpenLibrary, &[], &[Screen], "your files")
-        .title("Open your TUICanvas folder")
+        .title("Open your canter folder")
         .menu('f', Group::App),
     b(Act::SignIn, &[ch('L')], &[SignedOut], "sign in")
         .title("Sign in")

@@ -1,4 +1,4 @@
-//! Sign-in without Python: TUICanvas drives a browser over the DevTools
+//! Sign-in without Python: canter drives a browser over the DevTools
 //! protocol and saves the Canvas session itself.
 //!
 //! Two modes share this code. In the background mode (the default for UF)
@@ -6,7 +6,7 @@
 //! UF's form, and shows each Duo screen on one status line. In the window
 //! mode a separate, phone-sized window opens and the user drives it, which is
 //! what a password manager, a passkey, a security key or a Duo phone call
-//! needs; TUICanvas only watches for the Canvas session and then closes the
+//! needs; canter only watches for the Canvas session and then closes the
 //! window.
 //!
 //! Either way the finish is the same as the Python helper's: the browser's
@@ -94,8 +94,8 @@ impl SignInError {
     pub fn message(&self) -> String {
         match self {
             SignInError::NoBrowser(what) => format!(
-                "{what} was not found. Install it, set TUICANVAS_BROWSER to its path, \
-                 or sign in with the Python helper (tuicanvas --login --python)."
+                "{what} was not found. Install it, set CANTER_BROWSER to its path, \
+                 or sign in with the Python helper (canter --login --python)."
             ),
             SignInError::WrongPassword => {
                 "UF did not accept that sign-in. Nothing was retried.".into()
@@ -110,14 +110,14 @@ impl SignInError {
             SignInError::Network => "Could not reach Canvas. Try again when you are online.".into(),
             SignInError::Cancelled => "Sign-in cancelled.".into(),
             SignInError::TimedOut => {
-                "Sign-in timed out. Run tuicanvas --login --window to sign in in a window.".into()
+                "Sign-in timed out. Run canter --login --window to sign in in a window.".into()
             }
             SignInError::UnexpectedOrigin => "Sign-in reached an unexpected site and was stopped. \
-                 Use tuicanvas --login --window to sign in in a window."
+                 Use canter --login --window to sign in in a window."
                 .into(),
             SignInError::NativeReadFailed => {
                 "Canvas opened, but reading it directly failed. Try again, or use \
-                 tuicanvas --login --python."
+                 canter --login --python."
                     .into()
             }
             SignInError::Failed(why) => why.clone(),
@@ -243,7 +243,7 @@ const SNAPSHOT_SCRIPT: &str = r#"(() => {
       try { box = e.getBoundingClientRect(); } catch (_) { continue; }
       if (!box.width || !box.height || e.disabled) continue;
       const labels = e.labels ? Array.from(e.labels).map(l => l.innerText).join(' ') : '';
-      e.setAttribute('data-tuicanvas', String(out.controls.length));
+      e.setAttribute('data-canter', String(out.controls.length));
       out.controls.push({
         tag: e.tagName.toLowerCase(), type: e.type || '',
         label: e.getAttribute('aria-label') || labels || e.innerText ||
@@ -264,7 +264,7 @@ const SNAPSHOT_SCRIPT: &str = r#"(() => {
 
 /// Find a marked control in the page or any same-origin frame of it.
 const FIND_FUNCTION: &str = r#"const find = (doc, mark) => {
-    const hit = doc.querySelector('[data-tuicanvas="' + mark + '"]');
+    const hit = doc.querySelector('[data-canter="' + mark + '"]');
     if (hit) return hit;
     for (const frame of doc.querySelectorAll('iframe')) {
       try { if (frame.contentDocument) { const r = find(frame.contentDocument, mark); if (r) return r; } }
@@ -922,7 +922,7 @@ impl Flow<'_> {
             } else {
                 read_line(&format!("{prompt}: "))?
             };
-            let selector = format!("[data-tuicanvas=\"{mark}\"]");
+            let selector = format!("[data-canter=\"{mark}\"]");
             if page
                 .evaluate(&focus_field_script(&selector))
                 .map_err(from_cdp)?
@@ -1028,7 +1028,7 @@ fn read_secret(prompt: &str) -> Result<String, SignInError> {
     if enable_raw_mode().is_err() {
         println!();
         return Err(SignInError::Failed(
-            "This terminal cannot hide a password. Run tuicanvas --login --show-password \
+            "This terminal cannot hide a password. Run canter --login --show-password \
              to type it visibly, or --window to sign in in a window."
                 .into(),
         ));
@@ -1270,7 +1270,7 @@ mod tests {
     #[test]
     fn scripts_carry_values_as_json_and_never_a_password() {
         let script = select_script(2, "phone-\"1\"");
-        assert!(script.contains("data-tuicanvas=\"' + mark + '\""));
+        assert!(script.contains("data-canter=\"' + mark + '\""));
         assert!(script.contains(r#"e.value = "phone-\"1\"""#));
         assert!(click_script(3).contains("find(document, 3)"));
         assert!(set_checked_script(1, true).contains("e.checked = true"));
@@ -1278,7 +1278,7 @@ mod tests {
         assert!(focus.contains("e.value = ''"));
         assert!(focus.contains("e.focus()"));
         // The snapshot script reads text and controls, and marks them.
-        assert!(SNAPSHOT_SCRIPT.contains("data-tuicanvas"));
+        assert!(SNAPSHOT_SCRIPT.contains("data-canter"));
         assert!(FORM_VISIBLE_SCRIPT.contains("j_username"));
     }
 

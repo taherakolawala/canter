@@ -4,7 +4,7 @@ Every network read the reader makes is listed here with its purpose, trigger, an
 
 Evidence:
 - The web page's requests come from the analysed HAR (`benchmarks/initial-findings.md`), one assignment-detail page.
-- The reader's measurements come from `tuicanvas --smoke` (`benchmarks/private/smoke.json`, kept local). Live figures are filled in under "Measurements" once collected.
+- The reader's measurements come from `canter --smoke` (`benchmarks/private/smoke.json`, kept local). Live figures are filled in under "Measurements" once collected.
 
 ## Reads the reader performs
 
@@ -63,7 +63,7 @@ This is the one place the reader asks Canvas for something the user did not ask 
 | Images in an assignment | Same | When the assignment's detail is read (which the user started by opening it), after the image's details arrive | Stored in the assignment's folder; removed after a week unused unless the user opened or downloaded it |
 
 - **Credentials.** Canvas cookies go only to the Canvas origin, on the first hop. Every later hop must be HTTPS on port 443 to one of Canvas's two storage domains and gets no cookies (its address is signed). Anything else stops the download.
-- **Limits.** At most 2 downloads at once, separate from the 4 read slots; at most 6 redirects; at most 2 GB per file. The body streams to `.tuicanvas\partial` and is installed only when complete and the length matches.
+- **Limits.** At most 2 downloads at once, separate from the 4 read slots; at most 6 redirects; at most 2 GB per file. The body streams to `.canter\partial` and is installed only when complete and the length matches.
 - **After download.** The file gets the "downloaded from the internet" mark (Zone 3) that browsers add. It opens in its default app; programs and scripts are shown in File Explorer instead of being opened.
 
 ## Writes the reader makes
@@ -73,7 +73,7 @@ These are the only requests that change anything on Canvas. Each one is reached 
 | Write | Request | What is sent | Trigger | Rules |
 | --- | --- | --- | --- | --- |
 | File upload | `POST /api/v1/courses/:c/assignments/:a/submissions/self/files` per file, then the signed upload Canvas names, then `POST .../submissions` with `submission[submission_type]=online_upload` and `submission[file_ids][]` | The chosen files' names, sizes and contents | `s` on an assignment, then `y` on the review screen | Each file's size is checked against the review again before it is sent. Verified afterwards by re-reading the submission and matching every file id. |
-| Text entry | `POST /api/v1/courses/:c/assignments/:a/submissions` with `submission[submission_type]=online_text_entry` and `submission[body]` | The reviewed text, byte for byte, typed in TUICanvas or read from a UTF-8 file the user named (at most 100,000 characters) | `t` on an assignment, then `y` | Verified by re-reading the submission: the type must match and the stored body must not be empty. Canvas sanitises the HTML it stores, so the text is not compared character by character. |
+| Text entry | `POST /api/v1/courses/:c/assignments/:a/submissions` with `submission[submission_type]=online_text_entry` and `submission[body]` | The reviewed text, byte for byte, typed in canter or read from a UTF-8 file the user named (at most 100,000 characters) | `t` on an assignment, then `y` | Verified by re-reading the submission: the type must match and the stored body must not be empty. Canvas sanitises the HTML it stores, so the text is not compared character by character. |
 | Website URL | The same `POST`, with `online_url` and `submission[url]` | The reviewed address. An address typed without a scheme gets `https://`, and the review screen shows the result, so what is confirmed is what is sent. | `u` on an assignment, then `y` | Only `http` and `https`, no whitespace or control characters, a host with a dot, at most 2,000 characters. Verified by re-reading the submission; when Canvas records a different address, its version is reported. |
 
 - **No assignment in this account uses `online_url`,** so that write has been exercised only against a scripted transport offline. It needs a live check once an assignment of the type appears.
@@ -113,7 +113,7 @@ Shared rules:
 
 ## Decisions from measurements
 
-Live read-only runs of `tuicanvas --smoke` on 2026-10-16 (one account, 17 active courses, 157 assignments, Windows, home connection):
+Live read-only runs of `canter --smoke` on 2026-10-16 (one account, 17 active courses, 157 assignments, Windows, home connection):
 
 | Question | Result | Decision |
 | --- | --- | --- |

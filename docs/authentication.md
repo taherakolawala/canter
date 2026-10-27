@@ -52,7 +52,7 @@ The helper renders the normal login using an isolated headless Edge engine. Know
 
 Hidden password input is the default if `--show-password` is omitted. Playwright 1.64.0 is installed in the project's isolated environment; the helper uses the existing Edge installation. `--channel chrome` selects the installed Chrome instead. `--browser` uses the accepted visible-browser login fallback.
 
-After Canvas login, the helper tests a native HTTPS profile read. Successful authentication state is encrypted with Windows DPAPI for the current user and stored at `%LOCALAPPDATA%\TUICanvas\ufl.session.dpapi`. If browser login succeeds but native reads do not, the protected browser state is still retained and the diagnostic report records the distinction. No assertion of native authentication is made from the page URL alone.
+After Canvas login, the helper tests a native HTTPS profile read. Successful authentication state is encrypted with Windows DPAPI for the current user and stored at `%LOCALAPPDATA%\canter\ufl.session.dpapi`. If browser login succeeds but native reads do not, the protected browser state is still retained and the diagnostic report records the distinction. No assertion of native authentication is made from the page URL alone.
 
 Check session reuse without launching a browser:
 
@@ -68,15 +68,15 @@ Automated checks cover cookie scope, expiration/path matching, rotated/deleted c
 
 ## Sign-in in Rust
 
-The reader signs in itself, with no Python and no Playwright. It drives Microsoft Edge over the DevTools protocol: a real browser rendering UF's own login, controlled from the terminal. The Python helper stays in the tree and still works (`tuicanvas --login --python`).
+The reader signs in itself, with no Python and no Playwright. It drives Microsoft Edge over the DevTools protocol: a real browser rendering UF's own login, controlled from the terminal. The Python helper stays in the tree and still works (`canter --login --python`).
 
 Two modes share the code in `src/signin.rs`.
 
-**Background (the default for UF).** Edge runs with `--headless=new`, so there is no window. TUICanvas reads each page, asks for the GatorLink username and password in the terminal, fills UF's form, clicks UF's submit button, and shows every Duo screen on one status line, the same presentation the Python helper has: loading passes by on its own, Verified Push shows the code, the remembered-device question asks `y`/`n`, `o` opens other options, `m` shows the full prompt, `q` cancels. An unfamiliar challenge keeps its own instructions and numbered controls rather than being given a meaning it may not have.
+**Background (the default for UF).** Edge runs with `--headless=new`, so there is no window. canter reads each page, asks for the GatorLink username and password in the terminal, fills UF's form, clicks UF's submit button, and shows every Duo screen on one status line, the same presentation the Python helper has: loading passes by on its own, Verified Push shows the code, the remembered-device question asks `y`/`n`, `o` opens other options, `m` shows the full prompt, `q` cancels. An unfamiliar challenge keeps its own instructions and numbered controls rather than being given a meaning it may not have.
 
-**Window (the fallback, and the default for any other Canvas site).** `tuicanvas --login --window` opens a separate, phone-sized sign-in window (Edge with `--app=<url>` and `--window-size=420,760`), not a tab in a browser that is already open. The user drives it, so a password manager, a passkey, a security key and a Duo phone call all work. TUICanvas reads nothing from that page and types nothing into it; it watches for the Canvas session and closes the window as soon as sign-in finishes. The window is reachable on purpose, not only after a failure: by the flag, or by `TUICANVAS_SIGNIN=window`.
+**Window (the fallback, and the default for any other Canvas site).** `canter --login --window` opens a separate, phone-sized sign-in window (Edge with `--app=<url>` and `--window-size=420,760`), not a tab in a browser that is already open. The user drives it, so a password manager, a passkey, a security key and a Duo phone call all work. canter reads nothing from that page and types nothing into it; it watches for the Canvas session and closes the window as soon as sign-in finishes. The window is reachable on purpose, not only after a failure: by the flag, or by `CANTER_SIGNIN=window`.
 
-`TUICANVAS_SIGNIN` selects the default path: `background`, `window` or `python`. `TUICANVAS_BROWSER` names an exact browser executable, and `--chrome` uses an installed Chrome instead of Edge.
+`CANTER_SIGNIN` selects the default path: `background`, `window` or `python`. `CANTER_BROWSER` names an exact browser executable, and `--chrome` uses an installed Chrome instead of Edge.
 
 ### What it does with the password
 
@@ -84,9 +84,9 @@ The username and password live in memory only long enough to reach the page. The
 
 ### Where the session goes
 
-The browser's cookies are read with `Storage.getCookies`, converted to the session file's existing cookie shape (the same field names and leading-dot domain convention Playwright's storage state uses), and confirmed with one `/api/v1/users/self/profile` read, not by looking for something on Canvas's page. The result is written through `src/protect.rs` to the same DPAPI-protected file at `%LOCALAPPDATA%\TUICanvas\<host>.session.dpapi`, with any fields an earlier Python-written file had (its `origins` list, for example) carried over untouched. Nothing downstream changes.
+The browser's cookies are read with `Storage.getCookies`, converted to the session file's existing cookie shape (the same field names and leading-dot domain convention Playwright's storage state uses), and confirmed with one `/api/v1/users/self/profile` read, not by looking for something on Canvas's page. The result is written through `src/protect.rs` to the same DPAPI-protected file at `%LOCALAPPDATA%\canter\<host>.session.dpapi`, with any fields an earlier Python-written file had (its `origins` list, for example) carried over untouched. Nothing downstream changes.
 
-The sign-in browser uses its own profile folder, `%LOCALAPPDATA%\TUICanvas\signin\<host>`, so the user's real browser profile, extensions and sessions are untouched. Keeping that folder between runs is what lets UF's and Duo's remembered-device cookies survive; a saved session's cookies are also restored into the browser before it starts, for the same reason. One consequence of a separate profile: a password-manager extension installed in the user's own browser is not present in the window mode, though the operating system's autofill and passkeys still are. Browser local storage is not captured by the Rust path; the reader needs only cookies, and a file the Python helper wrote keeps its `origins` list.
+The sign-in browser uses its own profile folder, `%LOCALAPPDATA%\canter\signin\<host>`, so the user's real browser profile, extensions and sessions are untouched. Keeping that folder between runs is what lets UF's and Duo's remembered-device cookies survive; a saved session's cookies are also restored into the browser before it starts, for the same reason. One consequence of a separate profile: a password-manager extension installed in the user's own browser is not present in the window mode, though the operating system's autofill and passkeys still are. Browser local storage is not captured by the Rust path; the reader needs only cookies, and a file the Python helper wrote keeps its `origins` list.
 
 ### Failures, told apart
 
@@ -117,17 +117,17 @@ Everything after the form is unverified: filling the password, UF's submit, ever
 
 ```powershell
 cargo test
-target\release\tuicanvas.exe --logout
-target\release\tuicanvas.exe --login
+target\release\canter.exe --logout
+target\release\canter.exe --login
 ```
 
-What to look for on `--login`: one status line that updates in place (`Connecting to Canvas…`, then the GatorLink prompt, then `Checking your password…`), a Duo line that names the push or shows the three-digit code, the remembered-device question answered only by `y`/`n`, and a final `Signed in. Your session is saved for next time.` No window should appear, no `msedge.exe` should be left running afterwards, and `%LOCALAPPDATA%\TUICanvas\ufl.session.dpapi` should have a new timestamp. Then `target\release\tuicanvas.exe --smoke` should pass with that session.
+What to look for on `--login`: one status line that updates in place (`Connecting to Canvas…`, then the GatorLink prompt, then `Checking your password…`), a Duo line that names the push or shows the three-digit code, the remembered-device question answered only by `y`/`n`, and a final `Signed in. Your session is saved for next time.` No window should appear, no `msedge.exe` should be left running afterwards, and `%LOCALAPPDATA%\canter\ufl.session.dpapi` should have a new timestamp. Then `target\release\canter.exe --smoke` should pass with that session.
 
 Then the failure paths, one at a time: a deliberately wrong password (expect "UF did not accept that sign-in", and a prompt that does not retry on its own), a denied Duo request, and a Duo request left to expire. Then the window mode:
 
 ```powershell
-target\release\tuicanvas.exe --logout
-target\release\tuicanvas.exe --login --window
+target\release\canter.exe --logout
+target\release\canter.exe --login --window
 ```
 
-A single small window (about 420 by 760) should open on its own, outside any browser already running, and close itself a second or two after Canvas loads. Closing it by hand should report "The sign-in window was closed." Finally, `$env:TUICANVAS_SIGNIN = "python"` with `tuicanvas --login` should still run the Python helper unchanged.
+A single small window (about 420 by 760) should open on its own, outside any browser already running, and close itself a second or two after Canvas loads. Closing it by hand should report "The sign-in window was closed." Finally, `$env:CANTER_SIGNIN = "python"` with `canter --login` should still run the Python helper unchanged.

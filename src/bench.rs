@@ -1,4 +1,4 @@
-//! `tuicanvas --bench`: repeat the selected workflow (start -> course list ->
+//! `canter --bench`: repeat the selected workflow (start -> course list ->
 //! course -> assignment -> back) and time what a user would see, separating
 //! local work, network, parsing and drawing. Uses a private snapshot folder,
 //! so the user's own saved copies are untouched. Reports contain timings and
@@ -534,7 +534,7 @@ pub fn run(config: &Config, opts: BenchOptions) -> Result<(), String> {
     let load_started = Instant::now();
     let mut session = SessionFile::load(&config.session_path(), &config.origin)
         .map_err(|e| e.0)?
-        .ok_or("No saved session; run tuicanvas once to sign in.")?;
+        .ok_or("No saved session; run canter once to sign in.")?;
     let session_load_ms = ms(load_started);
     let account = account_of(config, &mut session)?;
     let cache_root = config.data_dir.join("bench-cache");

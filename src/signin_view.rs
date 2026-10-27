@@ -345,7 +345,7 @@ const PLAIN_FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
 impl Status {
     pub fn new() -> Self {
         let tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
-        // Windows consoles that TUICanvas supports draw the braille spinner;
+        // Windows consoles that canter supports draw the braille spinner;
         // anything redirected gets plain text.
         Status::with_sink(Box::new(std::io::stdout()), tty, tty, 80)
     }
