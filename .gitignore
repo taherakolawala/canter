@@ -6,3 +6,4 @@ __pycache__/
 target/
 *.session.dpapi
 
+.claude/
