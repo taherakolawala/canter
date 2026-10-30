@@ -13,6 +13,7 @@ mod config;
 mod diag;
 mod download;
 mod grades;
+mod home;
 mod html;
 mod images;
 mod inbox;

@@ -271,6 +271,18 @@ impl SnapshotStore {
         }
     }
 
+    /// The home screen's widgets as the user arranged them. A file that
+    /// cannot be read, or names a widget this version does not have, gives
+    /// the default board.
+    pub fn home_board(&self) -> Option<crate::home::Board> {
+        self.load_named::<crate::home::Board>("local-home-board.json")
+            .map(|(board, _)| board.cleaned())
+    }
+
+    pub fn save_home_board(&self, board: &crate::home::Board) {
+        self.save_named("local-home-board.json", board, Utc::now());
+    }
+
     /// Local course visibility does not change Canvas enrollment or its course snapshot.
     pub fn hidden_courses(&self) -> std::collections::BTreeSet<String> {
         self.load_named("local-hidden-courses.json")
