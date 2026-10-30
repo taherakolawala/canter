@@ -9,7 +9,7 @@ canter has two programs:
 
 The two share one file: the session, encrypted with Windows DPAPI at `%LOCALAPPDATA%\canter\ufl.session.dpapi`.
 
-The course list also has a local edit mode. Its hidden course IDs are kept in the origin and account scoped snapshot directory, separate from Canvas course data. A Canvas refresh cannot reset the user's home screen choices; editing adds no network reads.
+The home screen has two local choices: hidden courses (`Space` then `h`), kept in `local-hidden-courses.json`, and the widgets under the course list (`E`), kept in `local-home-board.json`. Both live in the origin and account scoped snapshot directory, separate from Canvas course data, so a Canvas refresh cannot reset them. Hiding a course reads nothing; adding a widget or making one bigger reads only what it then shows, and only what this run has not read already.
 
 ## Overview
 
@@ -78,6 +78,7 @@ flowchart LR
 | App state | `src/app.rs` | Pure state machine. Messages in (keys, fetch results, download progress, ticks); effects out (fetch, download, open a file, show a folder, open URL, sign in). Owns navigation, filtering, freshness rules and where each file goes. |
 | Runtime | `src/tui.rs` | Terminal setup and restore, input thread, async executor and download slots, sign-in handoff, opening files and folders, headless `--dump` mode |
 | Rendering | `src/ui.rs`, `src/theme.rs`, `src/html.rs` | Screens, the Assignments/Files tabs, the files & links list, colours, description HTML to terminal text with links numbered to match the list |
+| Home screen | `src/home.rs`, `src/app/board.rs`, `src/ui/board.rs` | The widgets under the course list: where each goes at each size (`home.rs`, pure layout), what each lists, opens and reads (`app/board.rs`), and drawing them (`ui/board.rs`). See **Home screen** below. |
 | Inline images | `src/images.rs` | Terminal capability detection, reading an image out of the library, fitting it to a box of text cells, and drawing it as half blocks |
 | Diagnostics | `src/diag.rs` | Endpoint templates, status, bytes and timings; optional JSONL log. Never URLs with ids, headers or bodies. |
 | Live check | `src/smoke.rs` | Read-only verification against Canvas that writes a metadata-only report |
@@ -320,6 +321,7 @@ sequenceDiagram
 | Visible-rows-only tables | `ui.rs` | Drawing cost does not grow with list length |
 | Description converted once per width | `ui.rs`, `html.rs` | Scrolling never re-parses HTML |
 | Search palette | `search.rs`, `app.rs` | `/` or `Ctrl+K` searches everything already read, without any request. Matching is a subsequence maximised by a small dynamic program, so each character is placed where the whole query scores best rather than where it first fits; adjacency pays more than a word start, or three scattered word starts would beat the literal word. A title match always outranks one that only matched the course a thing sits in, and a context match must contain the query as text, because scattered letters are findable in almost any long context. |
+| Home screen reads per board | `app/board.rs` | Each widget names what it reads at its size; the board's reads are gathered and repeats dropped, so widgets on the same planner month share one read, and the default board reads on entry exactly what the home screen did before it had widgets. The Grades widget's per-course reads go through the warm-up's two slots. |
 | Search warm-up | `app.rs` | The lists the palette needs. Saved copies are loaded from disk all at once when the course list arrives, so the box answers immediately; the reads that follow are queued two at a time, so the screen in front of the user keeps half the executor's capacity. Once per run per list, off unless a person is driving. |
 | `@class` tags | `search.rs`, `app.rs` | `parse` splits `@tag` out of the query; the tag is scored against course names and codes and resolves to the best match, not every course the letters appear in (`@comp` is a subsequence of both "Compilers" and "GPU Computing", and keeping both narrows nothing). While the tag is being typed the palette lists every candidate, ranked, so an ambiguity is visible rather than silently resolved. |
 | Hidden courses in search | `app.rs`, `cache.rs` | A separate switch from the course list's `H`, stored in `local-search-hidden.json`: one decides what you look at, the other what you can find. Off by default, since hiding a course usually means it is finished. |
@@ -386,6 +388,20 @@ Three things Canvas does are reflected deliberately. The course total is absent,
 Which assignments' comments have been seen is local to this machine (`local-seen-feedback.json`, beside the announcement reads) and Canvas is never told. Opening an assignment from the Grades tab is what clears its mark. The course list can show every course's current grade (`Space` then `g`), one switch for all of them, saved in `local-show-course-grades.json`; turning it on reads the grades of the courses on screen.
 
 A module file is placed after a fresh read of its details. When Files is shown the course's folder list is read too (or its saved copy used) so the file lands in `Class Files` under its Canvas folder; when Files is hidden the folder read would fail with 403, so the file goes to `Module Files/<module>`. Nothing is written to Canvas: module progress is not marked from the reader.
+
+## Home screen
+
+The course list keeps the top of the home screen. Under it is a board of widgets on a left and a right side, each widget in one of three sizes: Small is the 22 by 4 box the Inbox count always had, Medium is the side's full width at the height that widget asks for, and Large is half the side or all of it. Three files divide the work:
+
+- **`home.rs` is the layout and nothing else.** `Board` holds each side's widgets in order with their sizes, and the edits arranging needs: add, remove, resize, move along a side and across. `split` divides the screen into the course list, the rule under it and the board; `arrange` stacks each side's widgets top to bottom in their order: Smalls next to each other share a row while they fit, a half Large takes half the side, and a whole Large takes what the rest leave. A widget with no room is left out, never squeezed, and the rule names it. It draws nothing and reads nothing.
+- **`app/board.rs` is what needs the app's data.** For each widget: the entries it lists (`widget_entries`), what `Enter` and `o` do with the selected one, what it reads at its size (`widget_keys`), and how those reads stand (`widget_sync`, which puts "syncing…" or "! outdated" in the widget's border). It also holds arranging (`HomeEdit`, `edit_act`), which saves the board after every change.
+- **`ui/board.rs` draws it.** One function per widget with a branch per size, inside a shared frame (`boxed`) that puts the name, the size while arranging, and the sync state in the border.
+
+`Tab` must stop only on widgets that are on screen, in the order they are drawn, so the app needs the arrangement too. `ui::draw` records the terminal size on the app at the start of every frame (`app.size`), and the app calls `home::split` and `home::arrange` on it exactly as the renderer did. Because both use the same two functions, they cannot disagree.
+
+**Reads.** Each widget names what it shows at its size: the planner months its days fall in (one read a month, the fewest months that cover them), the course colours, Canvas's missing-work list for To do, and the Unread folder for the Inbox count, plus the Inbox folder at Medium or Large. Recent files read nothing; they come from the library's own index. `read_home` gathers the reads of every widget on the board, drops repeats and makes each once, saved copy first and then a fresh read, under the usual two-second reuse and latest-wins rules. A calendar and a To do on the same month therefore share one read, and the default board (the month calendar and the Inbox count) reads on entry exactly what the home screen read before it had widgets. `r` reads again what the widgets show.
+
+**Grades in the background.** The Grades widget shows every course's grade, which is three reads a course. Saved copies are loaded at once; the reads wait in `grade_queue` and share the search warm-up's two slots (`warm_running + grade_running.len() < WARM_AT_ONCE`), so the two together never take more than half the executor and the screen in front of the user is not kept waiting. Each course is read once a run, or again on `r`. A course whose read fails just shows no grade, rather than marking the widget outdated.
 
 ## Images in the terminal
 

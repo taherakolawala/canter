@@ -34,6 +34,44 @@ pub struct Entry {
     pub last_used: DateTime<Utc>,
     /// Downloaded automatically (assignment images); removed after the retention period.
     pub automatic: bool,
+    /// When canter last downloaded it (a resync counts). Unknown for files
+    /// downloaded before this was recorded.
+    #[serde(default)]
+    pub downloaded_at: Option<DateTime<Utc>>,
+    /// When canter last opened it for the user.
+    #[serde(default)]
+    pub opened_at: Option<DateTime<Utc>>,
+}
+
+/// A file the user downloaded or opened here, for the home screen.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Recent {
+    pub file_id: String,
+    pub path: PathBuf,
+    /// The folders it sits in under the library: the course's first.
+    pub folders: Vec<String>,
+    pub size: Option<u64>,
+    pub downloaded: Option<DateTime<Utc>>,
+    pub opened: Option<DateTime<Utc>>,
+}
+
+impl Recent {
+    pub fn name(&self) -> String {
+        self.path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
+
+    /// Opening it is the more recent of the two things that happened to it.
+    pub fn opened_last(&self) -> bool {
+        self.opened.is_some() && self.opened >= self.downloaded
+    }
+
+    /// When it was last downloaded or opened.
+    pub fn when(&self) -> Option<DateTime<Utc>> {
+        self.opened.max(self.downloaded)
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -374,16 +412,71 @@ impl Library {
         let mut index = self.lock();
         // A file the user asked for is never auto-removed, even if it was first fetched automatically.
         let automatic = automatic && existing.as_ref().is_none_or(|e| e.automatic);
+        let now = Utc::now();
         index.files.insert(
             file_id.to_string(),
             Entry {
                 version,
                 paths,
-                last_used: Utc::now(),
+                last_used: now,
                 automatic,
+                downloaded_at: Some(now),
+                opened_at: existing.and_then(|e| e.opened_at),
             },
         );
         self.save(&index)
+    }
+
+    /// The user opened this file from canter.
+    pub fn opened(&self, file_id: &str) {
+        let mut index = self.lock();
+        if let Some(e) = index.files.get_mut(file_id) {
+            let now = Utc::now();
+            e.opened_at = Some(now);
+            e.last_used = now;
+            let _ = self.save(&index);
+        }
+    }
+
+    /// The files the user downloaded or opened here, latest first. Pictures
+    /// canter saved from a page's text on its own are left out, since nobody
+    /// asked for those. From the index alone, so it is cheap enough to draw.
+    pub fn recent(&self, limit: usize) -> Vec<Recent> {
+        let index = self.lock();
+        let mut out: Vec<Recent> = index
+            .files
+            .iter()
+            .filter(|(_, e)| !e.automatic)
+            .filter_map(|(id, e)| {
+                let path = e.paths.first()?.clone();
+                let folders = path
+                    .strip_prefix(&self.root)
+                    .ok()
+                    .and_then(Path::parent)
+                    .map(|dir| {
+                        dir.components()
+                            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // Files from before the two times were kept: their last use
+                // is the best guess at when they arrived.
+                let downloaded = e
+                    .downloaded_at
+                    .or(e.opened_at.is_none().then_some(e.last_used));
+                Some(Recent {
+                    file_id: id.clone(),
+                    path,
+                    folders,
+                    size: e.version.size,
+                    downloaded,
+                    opened: e.opened_at,
+                })
+            })
+            .collect();
+        out.sort_by(|a, b| b.when().cmp(&a.when()).then_with(|| a.file_id.cmp(&b.file_id)));
+        out.truncate(limit);
+        out
     }
 
     /// Record a use, for the image retention rule.
@@ -417,6 +510,19 @@ impl Library {
             let _ = self.save(&index);
         }
         expired.len()
+    }
+
+    #[cfg(test)]
+    pub fn set_times(
+        &self,
+        file_id: &str,
+        downloaded: Option<DateTime<Utc>>,
+        opened: Option<DateTime<Utc>>,
+    ) {
+        if let Some(e) = self.lock().files.get_mut(file_id) {
+            e.downloaded_at = downloaded;
+            e.opened_at = opened;
+        }
     }
 
     #[cfg(test)]
@@ -537,6 +643,42 @@ mod tests {
             !lib.reference("missing", &assignment_path.with_file_name("x"))
                 .unwrap()
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recent_files_are_the_ones_downloaded_or_opened_not_page_pictures() {
+        let root = temp_root("recent");
+        let lib = Library::open(&root, "ufl.instructure.com");
+        let notes = lib.class_files_dir("EEL5934 GPU").join("Lectures").join("notes.pdf");
+        let picture = lib.assignment_dir("EEL5934 GPU", "Lab-2").join("diagram.png");
+        let handout = lib.assignment_dir("EEL5934 GPU", "Lab-2").join("handout.docx");
+        let tmp = lib.temp_dir().join("x.part");
+        for (id, path, automatic) in [("1", &notes, false), ("2", &picture, true), ("3", &handout, false)] {
+            write(&tmp, "x");
+            lib.install(id, &tmp, version("t", 1), path, automatic).unwrap();
+        }
+        let now = Utc::now();
+        lib.set_times("1", Some(now - Duration::days(3)), None);
+        lib.set_times("3", Some(now - Duration::days(5)), None);
+        lib.opened("3");
+        let recent = lib.recent(10);
+        assert_eq!(
+            recent.iter().map(Recent::name).collect::<Vec<_>>(),
+            vec!["handout.docx", "notes.pdf"],
+            "opened just now comes first; the picture is not listed"
+        );
+        assert!(recent[0].opened_last() && !recent[1].opened_last());
+        assert_eq!(recent[1].folders, vec!["EEL5934 GPU", "Class Files", "Lectures"]);
+        assert_eq!(recent[1].size, Some(1));
+        // Downloading again keeps when it was opened.
+        write(&tmp, "y");
+        lib.install("3", &tmp, version("t2", 1), &handout, false).unwrap();
+        assert!(lib.recent(1)[0].opened.is_some());
+        // An entry from before the times were kept still shows, by its last use.
+        lib.set_times("1", None, None);
+        assert!(lib.recent(10).iter().any(|r| r.file_id == "1" && r.downloaded.is_some()));
+        assert_eq!(lib.recent(1).len(), 1);
         let _ = std::fs::remove_dir_all(root);
     }
 

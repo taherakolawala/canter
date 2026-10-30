@@ -38,6 +38,8 @@ pub enum ResourceKey {
     Conversations(String),
     /// One Inbox conversation with its messages.
     Conversation(String),
+    /// Missing work across every course, for the home screen's To do.
+    Missing,
 }
 
 impl ResourceKey {
@@ -80,6 +82,7 @@ impl ResourceKey {
             ResourceKey::Conversation(c) if ok(c) => {
                 format!("conversation-{}", c.replace('~', "_"))
             }
+            ResourceKey::Missing => "missing".to_string(),
             _ => return None,
         };
         Some(name + ".json")
@@ -104,6 +107,7 @@ impl ResourceKey {
             ResourceKey::Pages(_) => "pages",
             ResourceKey::Conversations(_) => "inbox",
             ResourceKey::Conversation(_) => "conversation",
+            ResourceKey::Missing => "missing work",
         }
     }
 }
@@ -269,6 +273,18 @@ impl SnapshotStore {
                 let _ = std::fs::remove_file(&path);
             }
         }
+    }
+
+    /// The home screen's widgets as the user arranged them. A file that
+    /// cannot be read, or names a widget this version does not have, gives
+    /// the default board.
+    pub fn home_board(&self) -> Option<crate::home::Board> {
+        self.load_named::<crate::home::Board>("local-home-board.json")
+            .map(|(board, _)| board.cleaned())
+    }
+
+    pub fn save_home_board(&self, board: &crate::home::Board) {
+        self.save_named("local-home-board.json", board, Utc::now());
     }
 
     /// Local course visibility does not change Canvas enrollment or its course snapshot.

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::canvas::{CanvasClient, CanvasError, FetchStats};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Kind {
     Assignment,
     Quiz,
@@ -99,6 +99,11 @@ pub struct Item {
     /// Canvas page, usually a path on the Canvas origin.
     pub url: Option<String>,
     pub progress: Progress,
+    /// Canvas's planner marks an item with activity the student has not
+    /// seen: for an announcement, that it is unread. Copies saved before
+    /// this was read have it false.
+    #[serde(default)]
+    pub new: bool,
 }
 
 impl Item {
@@ -160,6 +165,8 @@ struct RawItem {
     submissions: Option<serde_json::Value>,
     #[serde(default)]
     planner_override: Option<RawOverride>,
+    #[serde(default)]
+    new_activity: bool,
 }
 
 fn id_text(value: Option<serde_json::Value>) -> Option<String> {
@@ -204,6 +211,7 @@ impl RawItem {
             points: plannable.and_then(|p| p.points_possible),
             url: self.html_url,
             progress,
+            new: self.new_activity,
         })
     }
 }
@@ -273,6 +281,107 @@ pub async fn read(
     let mut items: Vec<Item> = raw.into_iter().filter_map(RawItem::into_item).collect();
     items.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.title.cmp(&b.title)));
     Ok((items, stats))
+}
+
+/// Missing work across every course, asked for the way Canvas's own planner
+/// asks: only what can still be handed in, only this grading period, and
+/// with the student's own dismissals so those can be left out.
+pub const MISSING_PATH: &str = "/api/v1/users/self/missing_submissions\
+     ?include[]=planner_overrides&filter[]=submittable&filter[]=current_grading_period\
+     &per_page=100";
+
+#[derive(Deserialize)]
+struct RawMissingOverride {
+    #[serde(default)]
+    dismissed: bool,
+}
+
+/// One assignment from the missing-work read (an Assignment object).
+#[derive(Deserialize)]
+struct RawMissing {
+    #[serde(default)]
+    id: Option<serde_json::Value>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    due_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    points_possible: Option<f64>,
+    #[serde(default)]
+    course_id: Option<serde_json::Value>,
+    #[serde(default)]
+    html_url: Option<String>,
+    #[serde(default)]
+    submission_types: Vec<String>,
+    #[serde(default)]
+    planner_override: Option<RawMissingOverride>,
+}
+
+impl RawMissing {
+    /// Work dismissed in Canvas's planner is left out: the student has
+    /// already said they know about it.
+    fn into_item(self) -> Option<Item> {
+        if self.planner_override.is_some_and(|o| o.dismissed) {
+            return None;
+        }
+        let id = id_text(self.id).filter(|id| crate::model::valid_id(id))?;
+        let has = |t: &str| self.submission_types.iter().any(|s| s == t);
+        let kind = if has("online_quiz") {
+            Kind::Quiz
+        } else if has("discussion_topic") {
+            Kind::Discussion
+        } else {
+            Kind::Assignment
+        };
+        Some(Item {
+            kind,
+            id,
+            course_id: id_text(self.course_id).filter(|c| crate::model::valid_id(c)),
+            course: None,
+            title: self.name.unwrap_or_else(|| "(untitled)".into()),
+            at: self.due_at,
+            points: self.points_possible,
+            url: self.html_url,
+            progress: Progress::Missing,
+            new: false,
+        })
+    }
+}
+
+/// Every missing assignment, most recently due first.
+pub async fn read_missing(client: &CanvasClient) -> Result<(Vec<Item>, FetchStats), CanvasError> {
+    let (raw, stats): (Vec<RawMissing>, _) = client.get_all_pages(MISSING_PATH, 10).await?;
+    Ok((missing_items(raw), stats))
+}
+
+fn missing_items(raw: Vec<RawMissing>) -> Vec<Item> {
+    let mut items: Vec<Item> = raw.into_iter().filter_map(RawMissing::into_item).collect();
+    items.sort_by(|a, b| b.at.cmp(&a.at).then_with(|| a.title.cmp(&b.title)));
+    items
+}
+
+/// The fewest months whose planner reads cover `from` through `to`
+/// (inclusive). A month's read covers its whole grid, which runs into the
+/// weeks either side, so a short window near the start or end of a month is
+/// often inside one month's read already.
+pub fn months_covering(from: NaiveDate, to: NaiveDate) -> Vec<String> {
+    let covers = |month: NaiveDate, day: NaiveDate| {
+        let (start, weeks) = grid(month);
+        day >= start && day < start + Duration::days(7 * weeks as i64)
+    };
+    if covers(from, to) {
+        return vec![month_key(from)];
+    }
+    if covers(to, from) {
+        return vec![month_key(to)];
+    }
+    let mut out = vec![month_key(from)];
+    let mut month = from;
+    while !covers(month, to) && out.len() < 13 {
+        month = shift_month(month.with_day(1).expect("day 1 exists"), 1);
+        out.push(month_key(month));
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -390,6 +499,49 @@ mod tests {
         assert!(planner_path("../x").is_none());
         assert_eq!(parse_hex("#FA4616"), Some((250, 70, 22)));
         assert_eq!(parse_hex("red"), None);
+    }
+
+    #[test]
+    fn missing_work_skips_dismissals_and_unsafe_ids_and_names_quizzes() {
+        let raw: Vec<RawMissing> = serde_json::from_value(serde_json::json!([
+            {"id": 7, "name": "Lab-2", "due_at": "2026-10-20T03:59:00Z", "course_id": 10,
+             "points_possible": 10.0, "html_url": "https://ufl.instructure.com/courses/10/assignments/7",
+             "submission_types": ["online_upload"]},
+            {"id": 8, "name": "Quiz 3", "due_at": "2026-10-25T03:59:00Z", "course_id": 10,
+             "submission_types": ["online_quiz"]},
+            {"id": 9, "name": "Seen it", "course_id": 10, "planner_override": {"dismissed": true}},
+            {"id": "../x", "name": "Bad"}
+        ]))
+        .unwrap();
+        let items = missing_items(raw);
+        assert_eq!(
+            items.iter().map(|i| i.title.as_str()).collect::<Vec<_>>(),
+            vec!["Quiz 3", "Lab-2"],
+            "most recently due first"
+        );
+        assert_eq!(items[0].kind, Kind::Quiz);
+        assert_eq!(items[1].kind, Kind::Assignment);
+        assert!(items.iter().all(|i| i.progress == Progress::Missing));
+        assert_eq!(items[1].course_id.as_deref(), Some("10"));
+        assert!(
+            MISSING_PATH.chars().all(|c| c.is_ascii_graphic()),
+            "{MISSING_PATH}"
+        );
+    }
+
+    #[test]
+    fn a_window_reads_as_few_months_as_cover_it() {
+        let day = |m, d| NaiveDate::from_ymd_opt(2026, m, d).unwrap();
+        // October's grid ends on Saturday Oct 31: the week ahead needs November.
+        assert_eq!(
+            months_covering(day(10, 30), day(11, 6)),
+            vec!["2026-10", "2026-11"]
+        );
+        // September's grid runs on to Saturday Oct 3.
+        assert_eq!(months_covering(day(9, 28), day(10, 3)), vec!["2026-09"]);
+        // October's grid starts on Sunday Sep 27.
+        assert_eq!(months_covering(day(9, 27), day(10, 5)), vec!["2026-10"]);
+        assert_eq!(months_covering(day(11, 2), day(11, 9)), vec!["2026-11"]);
     }
 
     #[test]

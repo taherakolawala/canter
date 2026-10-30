@@ -18,6 +18,9 @@ use crate::model::{AssignmentDetail, AssignmentSummary, CanvasFile, CanvasFolder
 use crate::modules::ItemKind;
 use crate::submission::{self, DraftKind, FileChoice};
 
+mod board;
+pub use board::{HomeEdit, HomeEntry, WidgetSync};
+
 /// An in-flight read that started at most this long before an access may
 /// satisfy that access (approved freshness rule). Older ones may not.
 pub const REUSE_WINDOW: Duration = Duration::from_secs(2);
@@ -78,6 +81,7 @@ pub enum Payload {
     Pages(Vec<crate::modules::PageSummary>),
     Conversations(Vec<crate::inbox::Summary>),
     Conversation(Box<crate::inbox::Detail>),
+    Missing(Vec<crate::calendar::Item>),
 }
 
 /// One row of the Modules screen: a module's heading or one of its items.
@@ -426,21 +430,57 @@ impl MessageDraft {
     }
 }
 
-/// What has focus on an assignment or announcement page.
+/// What has focus on a page, or on the home screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Section {
+    /// A page's text, or the home screen's course list.
     #[default]
     Text,
     Links,
     Submissions,
     /// The instructor's feedback on the selected attempt.
     Feedback,
-    /// The month grid on the course list (a day is selected).
+    /// The home screen's calendar (with a day selected, unless it is Small).
     Calendar,
-    /// The selected day's entries, listed under the grid.
+    /// The selected day's entries.
     Day,
-    /// The Inbox, beside the calendar on the home screen.
+    /// The home screen's other widgets, one section each.
     Inbox,
+    Todo,
+    Announcements,
+    Grades,
+    RecentFiles,
+}
+
+impl Section {
+    /// The section a home-screen widget is.
+    pub fn of(widget: crate::home::Widget) -> Section {
+        use crate::home::Widget;
+        match widget {
+            Widget::Calendar => Section::Calendar,
+            Widget::Inbox => Section::Inbox,
+            Widget::Todo => Section::Todo,
+            Widget::Announcements => Section::Announcements,
+            Widget::Grades => Section::Grades,
+            Widget::RecentFiles => Section::RecentFiles,
+        }
+    }
+
+    /// The widget a home-screen section belongs to.
+    pub fn widget(self) -> Option<crate::home::Widget> {
+        use crate::home::Widget;
+        Some(match self {
+            Section::Calendar | Section::Day => Widget::Calendar,
+            Section::Inbox => Widget::Inbox,
+            Section::Todo => Widget::Todo,
+            Section::Announcements => Widget::Announcements,
+            Section::Grades => Widget::Grades,
+            Section::RecentFiles => Widget::RecentFiles,
+            Section::Text | Section::Links | Section::Submissions | Section::Feedback => {
+                return None;
+            }
+        })
+    }
 }
 
 /// One selectable entry of an assignment's feedback section.
@@ -837,6 +877,18 @@ pub struct App {
     pub inbox_item: usize,
     /// A message being written, if any.
     pub message: Option<MessageDraft>,
+    /// Missing work across every course, for the home screen's To do.
+    pub missing: Resource<Vec<crate::calendar::Item>>,
+    /// The home screen's widgets, as arranged.
+    pub board: crate::home::Board,
+    /// Arranging the widgets, while that is going on.
+    pub home_edit: Option<HomeEdit>,
+    /// The selected entry of the focused widget.
+    pub widget_row: usize,
+    /// Courses whose grades the Grades widget is bringing up to date, read
+    /// in the background within the warm-up's allowance.
+    grade_queue: std::collections::VecDeque<String>,
+    grade_running: Vec<String>,
 }
 
 /// `91.5%`, `88%`: a Canvas score, without a trailing `.0`.
@@ -905,6 +957,10 @@ impl App {
             .as_ref()
             .map(|s| s.conversation_reads())
             .unwrap_or_default();
+        let board = store
+            .as_ref()
+            .and_then(|s| s.home_board())
+            .unwrap_or_default();
         App {
             origin: origin.to_string(),
             store,
@@ -970,6 +1026,12 @@ impl App {
             inbox_folder: crate::inbox::Folder::default(),
             inbox_item: 0,
             message: None,
+            missing: Resource::default(),
+            board,
+            home_edit: None,
+            widget_row: 0,
+            grade_queue: std::collections::VecDeque::new(),
+            grade_running: Vec::new(),
         }
     }
 
@@ -1014,6 +1076,7 @@ impl App {
                 .map(|r| &r.sync),
             ResourceKey::Conversations(f) => self.conversations.get(f).map(|r| &r.sync),
             ResourceKey::Conversation(c) => self.conversation_details.get(c).map(|r| &r.sync),
+            ResourceKey::Missing => Some(&self.missing.sync),
         }
     }
 
@@ -1062,6 +1125,7 @@ impl App {
             ResourceKey::Conversation(c) => {
                 self.conversation_details.entry(c.clone()).or_default().sync = sync
             }
+            ResourceKey::Missing => self.missing.sync = sync,
         }
     }
 
@@ -1089,13 +1153,10 @@ impl App {
             let course_id = course_id.to_string();
             effects.extend(self.read_tabs(&course_id, explicit));
         }
-        // The calendar and the Inbox are part of the home screen: read them
-        // with the course list.
+        // The widgets are part of the home screen: read what they show with
+        // the course list.
         if self.view().kind == ViewKind::Courses {
-            effects.extend(self.read_calendar(explicit));
-            // The widget shows a count, so only the Unread folder is needed.
-            // The folder lists themselves are read by the Inbox screen.
-            effects.extend(self.read_unread());
+            effects.extend(self.read_home(explicit));
         }
         // Past submissions are part of the assignment page: read them with it
         // when the copy on hand shows something was submitted.
@@ -1306,6 +1367,15 @@ impl App {
                     res.version += 1;
                 }
             }
+            ResourceKey::Missing if self.missing.data.is_none() => {
+                if let Some((data, at)) = store.load(key) {
+                    self.missing.data = Some(data);
+                    self.missing.fetched_at = Some(at);
+                    self.missing.origin = Origin::Cache;
+                    self.missing.version += 1;
+                }
+            }
+            ResourceKey::Missing => {}
             ResourceKey::History(..) => {}
             ResourceKey::Courses => {}
         }
@@ -1492,6 +1562,7 @@ impl App {
                         r.version += 1;
                         self.clamp_selection();
                         effects.extend(self.read_course_grades());
+                        effects.extend(self.queue_home_grades(false));
                         effects.extend(self.start_warm_up());
                     }
                     (Payload::Announcements(list), ResourceKey::Announcements(c)) => {
@@ -1630,6 +1701,14 @@ impl App {
                         r.sync = SyncState::Idle;
                         r.version += 1;
                     }
+                    (Payload::Missing(items), ResourceKey::Missing) => {
+                        let r = &mut self.missing;
+                        r.data = Some(items);
+                        r.origin = Origin::Network;
+                        r.fetched_at = Some(at);
+                        r.sync = SyncState::Idle;
+                        r.version += 1;
+                    }
                     _ => self.set_sync(
                         &key,
                         SyncState::Failed(CanvasError::Invalid("mismatched response")),
@@ -1638,7 +1717,7 @@ impl App {
                 self.clamp_selection();
                 self.mark_current_announcement_read();
                 self.mark_current_conversation_read();
-                effects.extend(self.warm_done(&key));
+                effects.extend(self.background_done(&key));
                 effects
             }
             Err(error) => {
@@ -1679,7 +1758,7 @@ impl App {
                 }
                 // A list the warm-up could not read is simply missing from
                 // the search; the queue carries on without it.
-                effects.extend(self.warm_done(&key));
+                effects.extend(self.background_done(&key));
                 effects
             }
         }
@@ -2636,6 +2715,7 @@ impl App {
                         lib.keep(file_id);
                     }
                     if intent.open {
+                        lib.opened(file_id);
                         return vec![Effect::OpenPath(target)];
                     }
                     if !intent.quiet {
@@ -2741,6 +2821,9 @@ impl App {
                     }
                 }
                 if let Some(p) = placements.iter().find(|p| p.open) {
+                    if let Some(lib) = &self.library {
+                        lib.opened(&file_id);
+                    }
                     return vec![Effect::OpenPath(p.target.clone())];
                 }
                 if placements.iter().any(|p| !p.quiet) {
@@ -3045,6 +3128,13 @@ impl App {
         if self.whatif_input.is_some() {
             return vec![Scope::WhatIfInput];
         }
+        if let Some(edit) = &self.home_edit {
+            return vec![if edit.picker.is_some() {
+                Scope::WidgetPicker
+            } else {
+                Scope::HomeEdit
+            }];
+        }
         let view = self.view();
         let mut scopes = vec![Scope::Screen];
         if self.login_required {
@@ -3052,14 +3142,36 @@ impl App {
         }
         match &view.kind {
             ViewKind::Inbox { .. } => scopes.push(Scope::Inbox),
-            ViewKind::Courses => match self.focus() {
-                Section::Calendar => scopes.extend([Scope::Courses, Scope::Calendar]),
-                Section::Day => scopes.extend([Scope::Courses, Scope::Day]),
-                // The home screen shows a count in a box; the folders and the
-                // conversations are on the Inbox screen behind it.
-                Section::Inbox => scopes.extend([Scope::Courses, Scope::InboxWidget]),
-                _ => scopes.extend([Scope::List, Scope::Courses]),
-            },
+            ViewKind::Courses => {
+                let focus = self.focus();
+                let small = focus
+                    .widget()
+                    .is_some_and(|w| self.widget_is_small(w));
+                match focus {
+                    Section::Text | Section::Links | Section::Submissions | Section::Feedback => {
+                        scopes.extend([Scope::List, Scope::Courses])
+                    }
+                    // Today has no days to move between: it opens what is next.
+                    Section::Calendar if small => {
+                        scopes.extend([Scope::Courses, Scope::SmallWidget])
+                    }
+                    Section::Calendar => scopes.extend([Scope::Courses, Scope::Calendar]),
+                    Section::Day => scopes.extend([Scope::Courses, Scope::Day]),
+                    _ => {
+                        scopes.extend([
+                            Scope::Courses,
+                            if small {
+                                Scope::SmallWidget
+                            } else {
+                                Scope::ListWidget
+                            },
+                        ]);
+                        if focus == Section::RecentFiles {
+                            scopes.push(Scope::RecentFiles);
+                        }
+                    }
+                }
+            }
             ViewKind::Grades { .. } => {
                 scopes.extend([Scope::List, Scope::CourseTabs, Scope::Grades])
             }
@@ -3095,7 +3207,7 @@ impl App {
                     Section::Links => scopes.push(Scope::Links),
                     Section::Submissions => scopes.push(Scope::Submissions),
                     Section::Feedback => scopes.push(Scope::Feedback),
-                    Section::Text | Section::Calendar | Section::Day | Section::Inbox => {}
+                    _ => {}
                 }
             }
         }
@@ -3204,12 +3316,14 @@ impl App {
         self.mark_feedback_seen(&course_id, &assignment_id);
     }
 
-    /// Sections the current page has, in order: text, files & links, submissions.
     /// Sections the current page has, in order: text, files & links,
-    /// submissions. On the home screen: the courses, the calendar, the Inbox.
+    /// submissions. On the home screen: the course list, then each widget
+    /// that is on screen, in the order `Tab` visits them.
     pub fn sections(&self) -> Vec<Section> {
         if self.view().kind == ViewKind::Courses {
-            return vec![Section::Text, Section::Calendar, Section::Inbox];
+            let mut out = vec![Section::Text];
+            out.extend(self.arranged().spots.iter().map(|s| Section::of(s.widget)));
+            return out;
         }
         let Some(page) = self.view().kind.page() else {
             return vec![];
@@ -3233,7 +3347,12 @@ impl App {
     pub fn focus(&self) -> Section {
         let focus = self.view().focus;
         if focus == Section::Day {
-            return if self.day_items(self.calendar_day).is_empty() {
+            // A day's entries are listed only where the calendar shows days.
+            return if !self.sections().contains(&Section::Calendar)
+                || self.widget_is_small(crate::home::Widget::Calendar)
+            {
+                Section::Text
+            } else if self.day_items(self.calendar_day).is_empty() {
                 Section::Calendar
             } else {
                 Section::Day
@@ -3302,9 +3421,25 @@ impl App {
                     .selected_feedback(&c, &a)
                     .is_some_and(|e| matches!(e, FeedbackEntry::Comment(_))),
                 (Some(_), focus) => focus == Section::Links,
+                (None, Section::Calendar)
+                    if self.widget_is_small(crate::home::Widget::Calendar) =>
+                {
+                    !self
+                        .widget_entries(crate::home::Widget::Calendar, Utc::now())
+                        .is_empty()
+                }
                 (None, Section::Calendar | Section::Day) => {
                     !self.day_items(self.calendar_day).is_empty()
                 }
+                (
+                    None,
+                    focus @ (Section::Todo
+                    | Section::Announcements
+                    | Section::Grades
+                    | Section::RecentFiles),
+                ) if self.view().kind == ViewKind::Courses => focus
+                    .widget()
+                    .is_some_and(|w| !self.widget_entries(w, Utc::now()).is_empty()),
                 // The box opens whether or not anything is waiting: the
                 // folders are read by the screen it opens, not by the home
                 // screen, so there is nothing here to be empty.
@@ -3355,6 +3490,12 @@ impl App {
                     .iter()
                     .any(|l| matches!(l.target, Target::File { .. })),
             },
+            Act::ShowFolder if self.focus() == Section::RecentFiles => {
+                self.library.is_some()
+                    && !self
+                        .widget_entries(crate::home::Widget::RecentFiles, Utc::now())
+                        .is_empty()
+            }
             Act::ShowFolder | Act::OpenLibrary => self.library.is_some(),
             Act::Submit => self.accepts(DraftKind::Files),
             Act::SubmitText => self.accepts(DraftKind::Text),
@@ -3643,6 +3784,9 @@ impl App {
         if self.help.is_some() {
             return self.help_act(act);
         }
+        if self.home_edit.is_some() {
+            return self.edit_act(act);
+        }
         if self.menu.is_some() {
             return self.menu_act(act);
         }
@@ -3767,6 +3911,12 @@ impl App {
             Act::SignIn => vec![Effect::Login],
             Act::Reply => self.start_reply(),
             Act::NewMessage => self.start_message_to_teachers(),
+            Act::EditHome => {
+                self.start_editing();
+                vec![]
+            }
+            // Only while arranging, which `edit_act` handles.
+            Act::Bigger | Act::Smaller | Act::AddWidget | Act::RemoveWidget => vec![],
             Act::InputDone
             | Act::InputCancel
             | Act::InputComplete
@@ -3870,7 +4020,7 @@ impl App {
     /// course would queue behind fifty reads nobody asked for.
     fn warm_next(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
-        while self.warm_running < WARM_AT_ONCE {
+        while self.warm_running + self.grade_running.len() < WARM_AT_ONCE {
             let Some(key) = self.warm_queue.pop_front() else {
                 break;
             };
@@ -3892,14 +4042,27 @@ impl App {
         effects
     }
 
-    /// A warm-up read finished (or failed): free its slot and start the next.
-    fn warm_done(&mut self, key: &ResourceKey) -> Vec<Effect> {
+    /// A background read finished (or failed): free its slot and start the
+    /// next, the Grades widget's first since that is on screen.
+    fn background_done(&mut self, key: &ResourceKey) -> Vec<Effect> {
+        let mut freed = false;
         if let Some(at) = self.warm_keys.iter().position(|k| k == key) {
             self.warm_keys.remove(at);
             self.warm_running = self.warm_running.saturating_sub(1);
-            return self.warm_next();
+            freed = true;
         }
-        vec![]
+        if let ResourceKey::Grades(id) = key
+            && let Some(at) = self.grade_running.iter().position(|r| r == id)
+        {
+            self.grade_running.remove(at);
+            freed = true;
+        }
+        if !freed {
+            return vec![];
+        }
+        let mut effects = self.grade_next();
+        effects.extend(self.warm_next());
+        effects
     }
 
     /// Whether this resource has already been read from Canvas in this run,
@@ -3913,6 +4076,10 @@ impl App {
             ResourceKey::Pages(c) => fresh(self.page_lists.get(c).map(|r| r.origin)),
             ResourceKey::Files(c) => fresh(self.course_files.get(c).map(|r| r.origin)),
             ResourceKey::Conversations(f) => fresh(self.conversations.get(f).map(|r| r.origin)),
+            ResourceKey::Grades(c) => fresh(self.grades.get(c).map(|r| r.origin)),
+            ResourceKey::Planner(m) => fresh(self.planner.get(m).map(|r| r.origin)),
+            ResourceKey::Colors => fresh(self.colors.data.as_ref().map(|_| self.colors.origin)),
+            ResourceKey::Missing => fresh(self.missing.data.as_ref().map(|_| self.missing.origin)),
             _ => false,
         }
     }
@@ -4486,19 +4653,19 @@ impl App {
     /// Moving: rows in a list, lines of a page's text, or the entries of its
     /// focused section.
     fn navigate(&mut self, act: Act) -> Vec<Effect> {
-        if self.view().kind == ViewKind::Courses && self.focus() == Section::Calendar {
-            return self.move_day(act);
+        if self.view().kind == ViewKind::Courses {
+            match self.focus() {
+                Section::Text | Section::Day => {}
+                Section::Calendar if !self.widget_is_small(crate::home::Widget::Calendar) => {
+                    return self.move_day(act);
+                }
+                focus => return self.move_in_widget(focus, act),
+            }
         }
         if matches!(self.view().kind, ViewKind::Inbox { .. })
             && matches!(act, Act::Left | Act::Right)
         {
             return self.move_folder(act == Act::Right);
-        }
-        // On a home-screen widget the arrows move between widgets. There is
-        // one for now, so they do nothing; what they must not do is reach the
-        // course list behind it.
-        if self.view().kind == ViewKind::Courses && self.focus() == Section::Inbox {
-            return vec![];
         }
         if matches!(act, Act::Left | Act::Right) {
             return vec![];
@@ -4551,7 +4718,7 @@ impl App {
                 }
             }
             Section::Feedback => view.feedback = step(view.feedback),
-            Section::Calendar | Section::Day | Section::Inbox => {}
+            _ => {}
         }
         vec![]
     }
@@ -4597,13 +4764,6 @@ impl App {
         let key = ResourceKey::Conversations(self.inbox_folder.id().to_string());
         self.load_snapshot(&key);
         self.request(key, explicit).into_iter().collect()
-    }
-
-    /// Read the Unread folder, which is all the home screen's widget needs.
-    fn read_unread(&mut self) -> Vec<Effect> {
-        let key = ResourceKey::Conversations(crate::inbox::Folder::Unread.id().to_string());
-        self.load_snapshot(&key);
-        self.request(key, false).into_iter().collect()
     }
 
     /// The Unread folder's resource, for the widget's own loading state.
@@ -4702,6 +4862,9 @@ impl App {
             }
             _ => 0,
         };
+        if next.widget().is_some() {
+            self.widget_row = 0;
+        }
         let view = self.view_mut();
         view.focus = next;
         view.reveal = next != Section::Text;
@@ -4837,19 +5000,7 @@ impl App {
             (Section::Day, _) => items[self.day_item.min(items.len() - 1)].clone(),
             _ => items[0].clone(),
         };
-        if item.kind == crate::calendar::Kind::Assignment
-            && let Some(course_id) = item.course_id.clone()
-        {
-            let course_name = self.course_title(&course_id);
-            self.stack.push(View::new(ViewKind::Detail {
-                course_id,
-                course_name,
-                assignment_id: item.id.clone(),
-                title: item.title.clone(),
-            }));
-            return self.enter_current(false);
-        }
-        vec![Effect::OpenUrl(self.calendar_url(&item))]
+        self.open_item(item)
     }
 
     /// `r`: read this screen again now (and an assignment's past submissions,
@@ -4865,8 +5016,7 @@ impl App {
             effects.extend(self.read_tabs(&course_id, true));
         }
         if self.view().kind == ViewKind::Courses {
-            effects.extend(self.read_calendar(true));
-            effects.extend(self.read_inbox(true));
+            effects.extend(self.read_home(true));
         }
         if let ViewKind::Detail {
             course_id,
@@ -5060,6 +5210,12 @@ impl App {
     /// `e`: show the selected file, or this place's folder, in File Explorer.
     fn show_folder(&mut self) -> Vec<Effect> {
         let path = match self.view().kind.clone() {
+            ViewKind::Courses if self.focus() == Section::RecentFiles => {
+                match self.selected_entry(crate::home::Widget::RecentFiles, Utc::now()) {
+                    Some(HomeEntry::File(file)) => Some(file.path),
+                    _ => self.library.as_ref().map(|l| l.root().to_path_buf()),
+                }
+            }
             ViewKind::Courses => {
                 let course = self
                     .visible_rows()
@@ -5574,11 +5730,16 @@ impl App {
     }
 
     fn open_selected(&mut self) -> Vec<Effect> {
-        if matches!(self.focus(), Section::Calendar | Section::Day) {
-            return self.open_calendar_item();
-        }
-        if self.focus() == Section::Inbox && self.view().kind == ViewKind::Courses {
-            return self.open_inbox();
+        if self.view().kind == ViewKind::Courses {
+            match self.focus() {
+                Section::Text => {}
+                Section::Calendar | Section::Day
+                    if !self.widget_is_small(crate::home::Widget::Calendar) =>
+                {
+                    return self.open_calendar_item();
+                }
+                focus => return self.open_widget_entry(focus),
+            }
         }
         if matches!(self.view().kind, ViewKind::Inbox { .. }) {
             return self.open_conversation();
@@ -5803,8 +5964,13 @@ impl App {
                 Some(c) => format!("{}/conversations/{}", self.origin, c.id),
                 None => format!("{}/conversations", self.origin),
             }),
-            ViewKind::Courses if self.focus() == Section::Inbox => {
-                Some(format!("{}/conversations", self.origin))
+            ViewKind::Courses
+                if self.focus().widget().is_some()
+                    && (self.focus() != Section::Calendar
+                        || self.widget_is_small(crate::home::Widget::Calendar))
+                    && self.focus() != Section::Day =>
+            {
+                Some(self.widget_url(Utc::now()))
             }
             ViewKind::Announcements { course_id, .. } => {
                 let base = format!("{}/courses/{course_id}/announcements", self.origin);
@@ -9095,5 +9261,402 @@ mod tests {
         // Esc leaves without sending anything.
         app.update(key(KeyCode::Esc));
         assert!(app.submission.is_none());
+    }
+
+    // ---- The home screen's widgets ----
+
+    use crate::home::{Board, Side, Size, Tile, Widget};
+
+    fn board(left: &[(Widget, Size)], right: &[(Widget, Size)]) -> Board {
+        let tiles = |side: &[(Widget, Size)]| {
+            side.iter()
+                .map(|&(widget, size)| Tile { widget, size })
+                .collect()
+        };
+        Board {
+            left: tiles(left),
+            right: tiles(right),
+        }
+    }
+
+    /// What a board reads when the home screen opens, before the course
+    /// list is back.
+    fn reads_of(board: Board) -> Vec<ResourceKey> {
+        let mut app = App::new(ORIGIN, None);
+        app.board = board;
+        fetches(&app.start())
+    }
+
+    fn planner_months(from: chrono::NaiveDate, to: chrono::NaiveDate) -> Vec<ResourceKey> {
+        crate::calendar::months_covering(from, to)
+            .into_iter()
+            .map(ResourceKey::Planner)
+            .collect()
+    }
+
+    #[test]
+    fn each_widget_reads_what_it_shows_and_nothing_else() {
+        let today = chrono::Local::now().date_naive();
+        let days = chrono::Duration::days;
+        // To do: the planner for the week ahead, and the missing work.
+        assert_eq!(
+            reads_of(board(&[(Widget::Todo, Size::Medium)], &[])),
+            [
+                vec![ResourceKey::Courses],
+                planner_months(today, today + days(7)),
+                vec![ResourceKey::Colors, ResourceKey::Missing],
+            ]
+            .concat()
+        );
+        // Announcements: the planner for the last two weeks.
+        assert_eq!(
+            reads_of(board(&[(Widget::Announcements, Size::Small)], &[])),
+            [
+                vec![ResourceKey::Courses],
+                planner_months(today - days(13), today),
+                vec![ResourceKey::Colors],
+            ]
+            .concat()
+        );
+        // A Small Inbox needs only the count; bigger ones list the Inbox too.
+        assert_eq!(
+            reads_of(board(&[], &[(Widget::Inbox, Size::Small)])),
+            vec![
+                ResourceKey::Courses,
+                ResourceKey::Conversations("unread".into())
+            ]
+        );
+        assert_eq!(
+            reads_of(board(&[], &[(Widget::Inbox, Size::Medium)])),
+            vec![
+                ResourceKey::Courses,
+                ResourceKey::Conversations("unread".into()),
+                ResourceKey::Conversations("inbox".into()),
+            ]
+        );
+        // Recent files are on disk already, and an empty board reads nothing.
+        assert_eq!(
+            reads_of(board(&[(Widget::RecentFiles, Size::LargeWhole)], &[])),
+            vec![ResourceKey::Courses]
+        );
+        assert_eq!(reads_of(Board::default().cleaned()).len(), 4);
+        assert_eq!(reads_of(board(&[], &[])), vec![ResourceKey::Courses]);
+    }
+
+    #[test]
+    fn grades_are_read_in_the_background_two_at_a_time() {
+        let mut app = App::new(ORIGIN, None);
+        app.board = board(&[(Widget::Grades, Size::Medium)], &[]);
+        let (k, r) = fetch_of(&app.start());
+        let three = vec![course("10", "A"), course("20", "B"), course("30", "C")];
+        let started = fetches(&deliver_back(&mut app, k, r, Payload::Courses(three.clone())));
+        assert_eq!(
+            started,
+            vec![
+                ResourceKey::Grades("10".into()),
+                ResourceKey::Grades("20".into())
+            ],
+            "two at a time, like the warm-up"
+        );
+        assert!(app.widget_sync(Widget::Grades).syncing);
+        // One finishing starts the last.
+        let request = match app.sync_of(&started[0]) {
+            Some(SyncState::Syncing { request, .. }) => *request,
+            other => panic!("{other:?}"),
+        };
+        let grades = || Payload::Grades(Box::default());
+        let next = fetches(&deliver_back(&mut app, started[0].clone(), request, grades()));
+        assert_eq!(next, vec![ResourceKey::Grades("30".into())]);
+        for key in [started[1].clone(), next[0].clone()] {
+            let request = match app.sync_of(&key) {
+                Some(SyncState::Syncing { request, .. }) => *request,
+                other => panic!("{other:?}"),
+            };
+            assert!(fetches(&deliver_back(&mut app, key, request, grades())).is_empty());
+        }
+        assert!(!app.widget_sync(Widget::Grades).syncing);
+        // Coming back to the home screen does not read them again this run.
+        let effects = app.update(key(KeyCode::Enter));
+        let (k, r) = fetch_of(&effects);
+        deliver(&mut app, k, r, Payload::Assignments(vec![]));
+        let back = fetches(&app.update(key(KeyCode::Esc)));
+        assert!(
+            !back.iter().any(|k| matches!(k, ResourceKey::Grades(_))),
+            "{back:?}"
+        );
+        // r does, still two at a time.
+        let again = fetches(&app.update(key(KeyCode::Char('r'))));
+        let grades_read: Vec<_> = again
+            .iter()
+            .filter(|k| matches!(k, ResourceKey::Grades(_)))
+            .collect();
+        assert_eq!(grades_read.len(), 2, "{again:?}");
+    }
+
+    #[test]
+    fn the_grades_reads_share_the_warm_ups_allowance() {
+        let mut app = App::new(ORIGIN, None);
+        app.warm_up = true;
+        app.board = board(&[(Widget::Grades, Size::Medium)], &[]);
+        let (k, r) = fetch_of(&app.start());
+        let effects = deliver_back(
+            &mut app,
+            k,
+            r,
+            Payload::Courses(vec![course("10", "A"), course("20", "B")]),
+        );
+        assert_eq!(
+            fetches(&effects).len(),
+            WARM_AT_ONCE,
+            "background reads of both kinds together: {effects:?}"
+        );
+        assert_eq!(app.warm_running + app.grade_running.len(), WARM_AT_ONCE);
+    }
+
+    #[test]
+    fn tab_visits_the_widgets_in_the_order_they_are_drawn() {
+        let mut app = app_with_courses();
+        app.board = board(
+            &[(Widget::Todo, Size::Medium), (Widget::Calendar, Size::LargeWhole)],
+            &[(Widget::Inbox, Size::Small), (Widget::Grades, Size::Small)],
+        );
+        app.size = (100, 40);
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            app.update(key(KeyCode::Tab));
+            seen.push(app.focus());
+        }
+        assert_eq!(
+            seen,
+            vec![
+                Section::Todo,
+                Section::Calendar,
+                Section::Inbox,
+                Section::Grades,
+                Section::Text
+            ]
+        );
+        // A widget there is no room for is skipped, not visited blind.
+        app.size = (100, 18);
+        assert_eq!(app.arranged().left_out, vec![Widget::Calendar]);
+        assert!(!app.sections().contains(&Section::Calendar));
+        // On a Small widget the arrows go to the next widget, never to the
+        // course list behind them; on the calendar they move its day.
+        app.size = (100, 40);
+        app.view_mut().focus = Section::Inbox;
+        app.update(key(KeyCode::Down));
+        assert_eq!(app.focus(), Section::Grades);
+        app.update(key(KeyCode::Down));
+        assert_eq!(app.focus(), Section::Grades, "the last one stays put");
+        app.update(key(KeyCode::Up));
+        app.update(key(KeyCode::Up));
+        assert_eq!(app.focus(), Section::Calendar);
+        let day = app.calendar_day;
+        app.update(key(KeyCode::Up));
+        assert_eq!(app.focus(), Section::Calendar);
+        assert_eq!(app.calendar_day, day - chrono::Duration::days(7));
+        assert_eq!(app.view().selected, 0, "the course list did not move");
+    }
+
+    fn missing_item(id: &str, title: &str) -> crate::calendar::Item {
+        crate::calendar::Item {
+            kind: crate::calendar::Kind::Assignment,
+            id: id.into(),
+            course_id: Some("10".into()),
+            title: title.into(),
+            at: Some(Utc::now() - chrono::Duration::days(3)),
+            progress: crate::calendar::Progress::Missing,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn enter_on_a_widget_opens_what_is_selected_in_it() {
+        let mut app = app_with_courses();
+        app.board = board(
+            &[(Widget::Todo, Size::Medium)],
+            &[(Widget::Inbox, Size::Medium), (Widget::Grades, Size::Medium)],
+        );
+        app.missing = Resource {
+            data: Some(vec![missing_item("6", "Lab-2"), missing_item("5", "Lab-1")]),
+            ..Default::default()
+        };
+        app.conversations.insert(
+            "inbox".into(),
+            Resource {
+                data: Some(vec![conversation("5", "Lab 3 feedback", "unread")]),
+                ..Default::default()
+            },
+        );
+        // To do: the arrows move along it; Enter opens the assignment.
+        app.update(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Section::Todo);
+        app.update(key(KeyCode::Down));
+        let effects = app.update(key(KeyCode::Enter));
+        assert!(
+            matches!(&app.view().kind, ViewKind::Detail { assignment_id, .. } if assignment_id == "5"),
+            "{:?}",
+            app.view().kind
+        );
+        assert!(fetches(&effects).contains(&ResourceKey::Detail("10".into(), "5".into())));
+        app.update(key(KeyCode::Esc));
+        assert_eq!(app.focus(), Section::Todo, "back where it was");
+        // Inbox: the first row is the Inbox itself, then each conversation.
+        app.update(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Section::Inbox);
+        app.update(key(KeyCode::Down));
+        app.update(key(KeyCode::Enter));
+        assert!(
+            matches!(&app.view().kind, ViewKind::Conversation { conversation_id, .. } if conversation_id == "5"),
+            "{:?}",
+            app.view().kind
+        );
+        app.update(key(KeyCode::Esc));
+        app.update(key(KeyCode::Up));
+        app.update(key(KeyCode::Enter));
+        assert!(matches!(app.view().kind, ViewKind::Inbox { .. }));
+        app.update(key(KeyCode::Esc));
+        // Grades: a course's row opens its Grades tab.
+        app.update(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Section::Grades);
+        app.update(key(KeyCode::Down));
+        app.update(key(KeyCode::Enter));
+        assert!(
+            matches!(&app.view().kind, ViewKind::Grades { course_id, .. } if course_id == "20"),
+            "{:?}",
+            app.view().kind
+        );
+        // o on a widget is the Canvas page of the selection.
+        app.update(key(KeyCode::Esc));
+        assert_eq!(
+            app.update(key(KeyCode::Char('o'))),
+            vec![Effect::OpenUrl(format!("{ORIGIN}/courses/20/grades"))]
+        );
+    }
+
+    #[test]
+    fn recent_files_open_from_the_library_and_count_as_opened() {
+        let (lib, root) = temp_library("recent-widget");
+        let path = lib
+            .class_files_dir("GPU Computing")
+            .join("Lectures")
+            .join("notes.pdf");
+        let tmp = lib.temp_dir().join("x.part");
+        std::fs::create_dir_all(lib.temp_dir()).unwrap();
+        std::fs::write(&tmp, "x").unwrap();
+        let version = library::FileVersion {
+            updated_at: Some("t".into()),
+            size: Some(1),
+        };
+        lib.install("12", &tmp, version, &path, false).unwrap();
+        lib.set_times("12", Some(Utc::now() - chrono::Duration::days(2)), None);
+        let mut app = app_with_courses();
+        app.library = Some(lib.clone());
+        app.board = board(&[], &[(Widget::RecentFiles, Size::Medium)]);
+        app.update(key(KeyCode::Tab));
+        assert_eq!(app.focus(), Section::RecentFiles);
+        assert_eq!(
+            app.update(key(KeyCode::Char('e'))),
+            vec![Effect::Reveal(path.clone())],
+            "e shows it in its folder"
+        );
+        assert_eq!(app.update(key(KeyCode::Enter)), vec![Effect::OpenPath(path.clone())]);
+        assert!(lib.recent(1)[0].opened_last(), "opening it is remembered");
+        // A copy deleted by hand is said to be gone rather than opened, and
+        // is listed no more.
+        std::fs::remove_file(&path).unwrap();
+        assert!(app.update(key(KeyCode::Enter)).is_empty());
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("notes.pdf is no longer in your canter folder.")
+        );
+        assert!(lib.recent(1).is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn arranging_moves_resizes_adds_and_removes_and_is_remembered() {
+        let root = std::env::temp_dir().join(format!("canter-board-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Arc::new(SnapshotStore::new(&root, "one"));
+        let mut app = App::new(ORIGIN, Some(store.clone()));
+        let (k, r) = fetch_of(&app.start());
+        deliver(&mut app, k, r, Payload::Courses(vec![course("10", "GPU")]));
+        // E starts on the first widget, the calendar, with the keys for it.
+        app.update(key(KeyCode::Char('E')));
+        let edit = app.home_edit.clone().expect("arranging");
+        assert_eq!((edit.side, edit.index), (Side::Left, 0));
+        assert_eq!(app.screen_scopes(), vec![Scope::HomeEdit]);
+        // - makes it smaller and says what it shows at that size.
+        app.update(key(KeyCode::Char('-')));
+        assert_eq!(app.board.tile(Widget::Calendar).unwrap().size, Size::LargeHalf);
+        assert_eq!(
+            app.notice.as_deref(),
+            Some("Calendar, large, half: the month.")
+        );
+        // → selects the Inbox; Enter picks it up; ← carries it over; ↑ puts
+        // it above the calendar; Enter puts it down.
+        app.update(key(KeyCode::Right));
+        assert_eq!(
+            app.home_edit.as_ref().unwrap().selected(&app.board),
+            Some(Widget::Inbox)
+        );
+        app.update(key(KeyCode::Enter));
+        assert!(app.home_edit.as_ref().unwrap().holding);
+        app.update(key(KeyCode::Left));
+        app.update(key(KeyCode::Up));
+        app.update(key(KeyCode::Enter));
+        assert!(!app.home_edit.as_ref().unwrap().holding);
+        assert_eq!(
+            app.board,
+            board(
+                &[(Widget::Inbox, Size::Small), (Widget::Calendar, Size::LargeHalf)],
+                &[]
+            )
+        );
+        // a lists what is not on the board; Enter adds the first, Medium,
+        // under the selection, and reads what it shows.
+        app.update(key(KeyCode::Char('a')));
+        assert_eq!(app.home_edit.as_ref().unwrap().picker, Some(0));
+        assert_eq!(app.screen_scopes(), vec![Scope::WidgetPicker]);
+        assert_eq!(app.addable()[0], Widget::Todo);
+        let effects = app.update(key(KeyCode::Enter));
+        assert_eq!(app.board.left[1], Tile { widget: Widget::Todo, size: Size::Medium });
+        assert!(fetches(&effects).contains(&ResourceKey::Missing), "{effects:?}");
+        // + grows it; x takes it off again.
+        app.update(key(KeyCode::Char('+')));
+        assert_eq!(app.board.tile(Widget::Todo).unwrap().size, Size::LargeHalf);
+        app.update(key(KeyCode::Char('x')));
+        assert!(app.board.tile(Widget::Todo).is_none());
+        assert_eq!(app.notice.as_deref(), Some("Took To do off. a adds it back."));
+        // Esc is done. Every change was saved as it was made.
+        app.update(key(KeyCode::Esc));
+        assert!(app.home_edit.is_none());
+        let restarted = App::new(ORIGIN, Some(store.clone()));
+        assert_eq!(restarted.board, app.board);
+        let other = App::new(ORIGIN, Some(Arc::new(SnapshotStore::new(&root, "other"))));
+        assert_eq!(other.board, Board::default(), "each account has its own");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_board_file_that_cannot_be_read_gives_the_default() {
+        let root = std::env::temp_dir().join(format!("canter-board-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = Arc::new(SnapshotStore::new(&root, "one"));
+        let mut twice = board(&[(Widget::Todo, Size::Small)], &[(Widget::Todo, Size::Medium)]);
+        store.save_home_board(&twice);
+        let app = App::new(ORIGIN, Some(store.clone()));
+        twice.right.clear();
+        assert_eq!(app.board, twice, "a widget listed twice keeps its first place");
+        // A widget this version does not have: the whole file is set aside.
+        let path = root.join("user-one").join("local-home-board.json");
+        let mut saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        saved["data"] = serde_json::json!({"left": [{"widget": "weather", "size": "small"}]});
+        std::fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        let app = App::new(ORIGIN, Some(store));
+        assert_eq!(app.board, Board::default());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

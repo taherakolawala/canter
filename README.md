@@ -17,6 +17,7 @@ Current progress, known issues and next steps: [docs/status.md](docs/status.md).
 
 It covers sign in (GatorLink + Duo) → course list → assignment list → assignment details (deadline, submission status, description), course files, and announcements.
 
+- **Home screen.** The course list, and under it the widgets you choose: Calendar, To do (missing work and what is due this week), Inbox, Announcements, Grades and Recent files. Each comes small, medium or large, and a bigger one shows more. `E` arranges them.
 - Every screen shows a saved copy right away, with **Syncing…** at the top while it fetches fresh data. If the fetch fails, the screen says **Outdated** instead of pretending the old copy is current.
 - **Files.** Each course has a Files tab that mirrors its Canvas folders, and each assignment lists its attachments and links. Files download into `C:\Users\<you>\canter\<course>\Class Files` or `Assignment Files\<assignment>` and open in their default app. A file used in both places is stored once.
 - **Announcements.** A per-course tab lists all announcements newest-first, with author, posting date and Canvas read status. Open one to read its message and attachments; replies open in the browser. Opening a readable message marks it Read locally in the TUI, remembered across restarts. Canvas read status is unchanged. Files are fetched only when you choose them and go in `Announcement Files\<announcement-id>`.
@@ -66,11 +67,11 @@ canter --bench [N]     Time the workflow N times -> benchmarks/private/tui-bench
 | --- | --- |
 | `↑` `↓` / `j` `k`, PgUp/PgDn, `g` `G` | Move or scroll |
 | `Enter` / `→` | Open (a file opens in its default app, downloading it first if needed) |
-| `E` | From the course list, edit the home screen. `Enter` hides or restores a selected course; `Esc` finishes editing. Hidden courses remain visible while editing. |
+| `E` | On the home screen, arrange the widgets under the course list. The arrows select one, `Enter` picks it up so the arrows move it (`←`/`→` to the other side), `+`/`-` change its size, `a` adds a widget, `x` takes one off and `Esc` finishes. The arrangement is saved for your account. (`Space` then `h` hides a course.) |
 | `s` | On an assignment, start a file submission in your Windows user folder. Type a name or paste a full path; matching local files and folders appear as you type. Use `↑`/`↓` and `Tab` to complete, then `Enter` to add each file. `Ctrl+U` clears the path. After adding files, press `Enter` at the starting folder to review, `y` to submit, or `Esc` to cancel. Files are checked against Canvas's allowed extensions and upload size rules. |
 | `h` | On an assignment, open past submissions. Use `←`/`→` to switch attempts and `↑`/`↓` to scroll the selected attempt. `r` refreshes; `Esc` returns to the assignment. |
 | `Esc` / `←` / Backspace | Back (or clear the filter or selection) |
-| `Tab` / `Shift+Tab` | In a course: cycle Assignments, Files and Announcements forward/backward. In an assignment or announcement: select the next/previous file or link (`1`–`9` jump to one) |
+| `Tab` / `Shift+Tab` | On the home screen: move between the course list and each widget. In a course: cycle Assignments, Files and Announcements forward/backward. In an assignment or announcement: select the next/previous file or link (`1`–`9` jump to one) |
 | `d` / `D` | Download the selected file (or folder) / everything here |
 | `e` | Show the file or its folder in File Explorer (on the course list: your canter folder) |
 | `/` | Filter the current list (in Files: search the whole course) |
