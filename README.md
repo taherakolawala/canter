@@ -1,4 +1,14 @@
-# canter                                                                           
+```
+   █████████    █████████   ██████   █████ ███████████ ██████████ ███████████  
+  ███▒▒▒▒▒███  ███▒▒▒▒▒███ ▒▒██████ ▒▒███ ▒█▒▒▒███▒▒▒█▒▒███▒▒▒▒▒█▒▒███▒▒▒▒▒███ 
+ ███     ▒▒▒  ▒███    ▒███  ▒███▒███ ▒███ ▒   ▒███  ▒  ▒███  █ ▒  ▒███    ▒███ 
+▒███          ▒███████████  ▒███▒▒███▒███     ▒███     ▒██████    ▒██████████  
+▒███          ▒███▒▒▒▒▒███  ▒███ ▒▒██████     ▒███     ▒███▒▒█    ▒███▒▒▒▒▒███ 
+▒▒███     ███ ▒███    ▒███  ▒███  ▒▒█████     ▒███     ▒███ ▒   █ ▒███    ▒███ 
+ ▒▒█████████  █████   █████ █████  ▒▒█████    █████    ██████████ █████   █████
+  ▒▒▒▒▒▒▒▒▒  ▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒    ▒▒▒▒▒    ▒▒▒▒▒    ▒▒▒▒▒▒▒▒▒▒ ▒▒▒▒▒   ▒▒▒▒▒ 
+```                                                                               
+
 A fast, keyboard-driven terminal interface for [Canvas LMS](https://www.instructure.com/canvas), built first for the University of Florida's Canvas (`ufl.instructure.com`).
 
 The Canvas web page for one assignment makes 183 requests (1.4 MB) before the assignment shows up. canter skips the web app and makes only the reads each screen needs:
