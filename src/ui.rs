@@ -4256,6 +4256,7 @@ mod tests {
             points: None,
             url: Some(format!("/courses/10/assignments/{id}")),
             progress,
+            new: false,
         };
         send_fetch(
             &mut app,
