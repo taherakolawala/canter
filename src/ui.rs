@@ -4663,6 +4663,415 @@ mod tests {
         assert!(rendered.contains("Welcome") && rendered.contains("(course home)"));
         assert!(rendered.contains("Old lab") && rendered.contains("Locked"));
     }
+
+    /// A home screen with something for every widget: two courses, the
+    /// planner around today, missing work, conversations, grades and two
+    /// downloaded files. The data is put in place directly; how it is read
+    /// is the app's tests' business.
+    fn widget_app(tag: &str) -> (App, std::path::PathBuf) {
+        use crate::app::Resource;
+        use crate::calendar::{Item, Kind, Progress};
+        use chrono::{Duration, TimeZone};
+        fn ready<T>(data: T) -> Resource<T> {
+            Resource {
+                data: Some(data),
+                ..Default::default()
+            }
+        }
+        let now = Utc::now();
+        let mut app = App::new("https://ufl.instructure.com", None);
+        app.courses = ready(vec![
+            Course {
+                id: "10".into(),
+                name: Some("GPU Computing".into()),
+                course_code: Some("EEL5934".into()),
+                ..Default::default()
+            },
+            Course {
+                id: "11".into(),
+                name: Some("Data Science".into()),
+                course_code: Some("CAP3027".into()),
+                ..Default::default()
+            },
+        ]);
+        app.colors = ready(Default::default());
+        let item = |kind, id: &str, course: &str, title: &str, at, progress, new| Item {
+            kind,
+            id: id.into(),
+            course_id: Some(course.into()),
+            course: None,
+            title: title.into(),
+            at: Some(at),
+            points: Some(20.0),
+            url: Some(format!("/courses/{course}/assignments/{id}")),
+            progress,
+            new,
+        };
+        // Late today, so it is still ahead whenever the test runs.
+        let today = now.with_timezone(&Local).date_naive();
+        let tonight = Local
+            .from_local_datetime(&today.and_hms_opt(23, 59, 0).unwrap())
+            .earliest()
+            .unwrap()
+            .with_timezone(&Utc);
+        let planner = vec![
+            item(Kind::Assignment, "7", "10", "Lab-3", tonight, Progress::Open, false),
+            item(Kind::Assignment, "8", "11", "HW 5", now + Duration::days(2), Progress::Open, false),
+            item(Kind::Quiz, "9", "10", "Quiz 4", now + Duration::days(3), Progress::Open, false),
+            item(Kind::Announcement, "40", "10", "Exam moved", now - Duration::days(1), Progress::Open, true),
+            item(Kind::Announcement, "41", "11", "Welcome", now - Duration::days(5), Progress::Open, false),
+        ];
+        let from = today - Duration::days(14);
+        let to = today + Duration::days(8);
+        for month in crate::calendar::months_covering(from, to) {
+            app.planner.insert(month, ready(planner.clone()));
+        }
+        app.planner.insert(
+            crate::calendar::month_key(app.calendar_day),
+            ready(planner.clone()),
+        );
+        app.missing = ready(vec![item(
+            Kind::Assignment,
+            "6",
+            "10",
+            "Lab-2",
+            now - Duration::days(9),
+            Progress::Missing,
+            false,
+        )]);
+        let unread = sample_conversation("5", "Lab 3 feedback", "unread", false);
+        let read = sample_conversation("6", "Office hours moved", "read", false);
+        app.conversations
+            .insert("unread".into(), ready(vec![unread.clone()]));
+        app.conversations.insert("inbox".into(), ready(vec![unread, read]));
+        let graded = |id: &str, name: &str, score: f64, days: i64| AssignmentSummary {
+            id: id.into(),
+            name: Some(name.into()),
+            points_possible: Some(10.0),
+            submission: Some(Submission {
+                score: Some(score),
+                graded_at: Some(now - Duration::days(days)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let grades = |score: f64, letter: &str, assignments, feedback| crate::grades::Grades {
+            total: Some(crate::grades::Total {
+                score: Some(score),
+                grade: Some(letter.into()),
+            }),
+            groups: vec![crate::grades::Group {
+                id: "1".into(),
+                assignments,
+                ..Default::default()
+            }],
+            feedback,
+            ..Default::default()
+        };
+        app.grades.insert(
+            "10".into(),
+            ready(grades(
+                93.0,
+                "A",
+                vec![graded("1", "Lab-1", 9.0, 1)],
+                vec![crate::grades::Feedback {
+                    assignment_id: "1".into(),
+                    count: 1,
+                    latest: Some(now),
+                }],
+            )),
+        );
+        app.grades.insert(
+            "11".into(),
+            ready(grades(85.0, "B", vec![graded("2", "HW 4", 8.0, 3)], vec![])),
+        );
+        let root = std::env::temp_dir().join(format!("canter-widgets-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let lib = crate::library::Library::open(&root, "ufl.instructure.com");
+        let version = crate::library::FileVersion {
+            updated_at: Some("t".into()),
+            size: Some(2048),
+        };
+        for (id, path) in [
+            ("1", lib.class_files_dir("EEL5934 GPU Computing").join("Lectures").join("notes.pdf")),
+            ("2", lib.assignment_dir("CAP3027 Data Science", "HW 5").join("handout.docx")),
+        ] {
+            let tmp = lib.temp_dir().join("x.part");
+            std::fs::create_dir_all(lib.temp_dir()).unwrap();
+            std::fs::write(&tmp, "x").unwrap();
+            lib.install(id, &tmp, version.clone(), &path, false).unwrap();
+        }
+        lib.set_times("1", Some(now - Duration::days(4)), Some(now - Duration::hours(2)));
+        lib.set_times("2", Some(now - Duration::days(1)), None);
+        app.library = Some(std::sync::Arc::new(lib));
+        (app, root)
+    }
+
+    fn board(left: &[(Widget, Size)], right: &[(Widget, Size)]) -> crate::home::Board {
+        let tiles = |side: &[(Widget, Size)]| {
+            side.iter()
+                .map(|&(widget, size)| crate::home::Tile { widget, size })
+                .collect()
+        };
+        crate::home::Board {
+            left: tiles(left),
+            right: tiles(right),
+        }
+    }
+
+    use crate::home::{Size, Widget};
+
+    #[test]
+    fn small_widgets_each_show_the_one_thing_they_are_for() {
+        let (mut app, root) = widget_app("small");
+        app.board = board(
+            &[
+                (Widget::Calendar, Size::Small),
+                (Widget::Todo, Size::Small),
+                (Widget::Inbox, Size::Small),
+            ],
+            &[
+                (Widget::Announcements, Size::Small),
+                (Widget::Grades, Size::Small),
+                (Widget::RecentFiles, Size::Small),
+            ],
+        );
+        let home = screen(&mut app, 100, 24);
+        println!("{home}\n");
+        for part in [
+            "Calendar",
+            "1 left today",
+            "Lab-3",
+            "To do",
+            "! 1 missing",
+            "\u{2709} Inbox",
+            "1 unread",
+            "Dr Ada",
+            "Announcements",
+            "EEL5934",
+            "Grades",
+            "Lab-1",
+            "9/10",
+            "A 93%",
+            "Recent files",
+            "notes.pdf",
+            "opened 2 h ago",
+        ] {
+            assert!(home.contains(part), "{part} missing:\n{home}");
+        }
+        // Small is the Inbox box's old size, and two share a row.
+        assert!(home.contains("┌ Calendar · "), "{home}");
+        assert!(
+            !home.contains("Lab 3 feedback"),
+            "no conversations in a Small Inbox:\n{home}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn medium_widgets_list_a_few_of_each() {
+        let (mut app, root) = widget_app("medium");
+        app.board = board(
+            &[
+                (Widget::Todo, Size::Medium),
+                (Widget::Calendar, Size::Medium),
+                (Widget::Announcements, Size::Medium),
+            ],
+            &[
+                (Widget::Inbox, Size::Medium),
+                (Widget::Grades, Size::Medium),
+                (Widget::RecentFiles, Size::Medium),
+            ],
+        );
+        let home = screen(&mut app, 120, 30);
+        println!("{home}\n");
+        for part in [
+            "To do · 1 missing",
+            "missing",
+            "Lab-2",
+            "Lab-3",
+            "HW 5",
+            "20 pts",
+            "Calendar · ",
+            "Sun ",
+            "Announcements · 1 unread",
+            "• EEL5934",
+            "Exam moved",
+            "Welcome",
+            "Inbox · 1 unread",
+            "all conversations",
+            "Lab 3 feedback",
+            "Office hours moved",
+            "Grades · * new feedback",
+            "GPU Computing",
+            "A 93%",
+            "B 85%",
+            "notes.pdf",
+            "handout.docx",
+            "downloaded 24 h ago",
+        ] {
+            assert!(home.contains(part), "{part} missing:\n{home}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn large_widgets_show_everything_with_the_details() {
+        let (mut app, root) = widget_app("large");
+        app.board = board(
+            &[
+                (Widget::Todo, Size::LargeHalf),
+                (Widget::Announcements, Size::LargeHalf),
+            ],
+            &[
+                (Widget::Grades, Size::LargeHalf),
+                (Widget::RecentFiles, Size::LargeWhole),
+            ],
+        );
+        let home = screen(&mut app, 120, 40);
+        println!("{home}\n");
+        for part in [
+            "1 missing · 3 due in 7 days · 60 points",
+            "Missing",
+            "due 9 days ago",
+            "Today",
+            "11:59 PM",
+            "1 unread: EEL5934 1",
+            "Recently graded",
+            "Lab-1",
+            "GPU Computing",
+            "2 KB",
+            "Lectures",
+            "HW 5",
+        ] {
+            assert!(home.contains(part), "{part} missing:\n{home}");
+        }
+        // Grades are numbers, not bars.
+        assert!(!home.contains('\u{2588}'), "a bar is drawn:\n{home}");
+        app.board = board(
+            &[(Widget::Calendar, Size::LargeWhole)],
+            &[(Widget::Inbox, Size::LargeWhole)],
+        );
+        let home = screen(&mut app, 120, 40);
+        println!("{home}\n");
+        let month = app.calendar_day.format("%B %Y").to_string();
+        assert!(home.contains(&month) && home.contains("Sat"), "{home}");
+        assert!(
+            home.contains("Lab 3 feedback") && home.contains("Office hours moved"),
+            "{home}"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn every_board_draws_at_every_size_without_panicking() {
+        let (mut app, root) = widget_app("sizes");
+        for size in Size::ALL {
+            let tiles: Vec<(Widget, Size)> = Widget::ALL.into_iter().map(|w| (w, size)).collect();
+            let (left, right) = tiles.split_at(3);
+            app.board = board(left, right);
+            for (w, h) in [(160, 50), (100, 30), (80, 24), (60, 20), (40, 12), (22, 6), (1, 1)] {
+                let _ = screen(&mut app, w, h);
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_widget_with_no_room_is_named_rather_than_lost() {
+        let (mut app, root) = widget_app("room");
+        app.board = board(
+            &[
+                (Widget::Calendar, Size::LargeWhole),
+                (Widget::Todo, Size::Medium),
+                (Widget::Grades, Size::Medium),
+            ],
+            &[(Widget::Inbox, Size::Small)],
+        );
+        let home = screen(&mut app, 100, 20);
+        println!("{home}\n");
+        assert!(home.contains("doesn't fit · E to arrange"), "{home}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn arranging_shows_the_sizes_the_selection_and_what_can_be_added() {
+        let (mut app, root) = widget_app("edit");
+        let press =
+            |app: &mut App, code| app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        press(&mut app, KeyCode::Char('E'));
+        let editing = screen(&mut app, 100, 30);
+        println!("{editing}\n");
+        for part in [
+            "Arranging the home screen",
+            "large, whole",
+            "· small",
+            "\u{2554}",
+            "+/- size",
+            "a add",
+            "x remove",
+            "Esc done",
+        ] {
+            assert!(editing.contains(part), "{part} missing:\n{editing}");
+        }
+        // Picked up, it says so.
+        press(&mut app, KeyCode::Enter);
+        let held = screen(&mut app, 100, 30);
+        assert!(held.contains("· moving"), "{held}");
+        press(&mut app, KeyCode::Esc);
+        // The picker lists what is not on the board, with what each one reads.
+        press(&mut app, KeyCode::Char('a'));
+        let picker = screen(&mut app, 100, 30);
+        println!("{picker}\n");
+        for part in [
+            "Add a widget",
+            "To do",
+            "Missing work, then what is due",
+            "Recent files",
+            "Reads nothing from",
+        ] {
+            assert!(picker.contains(part), "{part} missing:\n{picker}");
+        }
+        press(&mut app, KeyCode::Esc);
+        // A side with nothing on it shows where a widget would go.
+        press(&mut app, KeyCode::Char('x'));
+        let empty = screen(&mut app, 100, 30);
+        println!("{empty}\n");
+        assert!(empty.contains("Empty. a adds a widget here."), "{empty}");
+        for (w, h) in [(60, 20), (40, 12), (22, 6), (1, 1)] {
+            let _ = screen(&mut app, w, h);
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_widget_marks_its_selection_and_keeps_it_in_view() {
+        let (mut app, root) = widget_app("select");
+        app.board = board(&[(Widget::Todo, Size::Medium)], &[(Widget::Inbox, Size::Small)]);
+        let press =
+            |app: &mut App, code| app.update(Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        let mut t = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let b = t.backend().buffer();
+        let row = (0..30)
+            .find(|&y| {
+                (0..100)
+                    .map(|x| b[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("Quiz 4")
+            })
+            .expect("the fourth entry is in view");
+        assert_eq!(
+            b[(10, row)].style().bg,
+            theme::selected().bg,
+            "and it is the one marked"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 /// Writes colour previews of each screen as HTML when CANTER_PREVIEW is set
