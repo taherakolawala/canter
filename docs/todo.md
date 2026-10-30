@@ -17,8 +17,23 @@ owed" at the end.
   other Canvas sites. The window opens on its own, not as a tab in a browser
   the user already has open, is about the size of a phone screen, and closes
   itself once sign-in finishes.
-- **Home screen `Tab`.** `Tab` cycles Courses → Calendar → Inbox, and
-  `Shift+Tab` goes back the other way, as it already does everywhere else.
+- **Home screen `Tab`.** `Tab` cycles the course list, then each widget on
+  screen, the left side first and each side top to bottom; `Shift+Tab` goes
+  back the other way, as it already does everywhere else.
+- **Home screen widgets (2026-10-30).** The course list stays fixed at the
+  top. Under it, widgets the user arranges (`E`) on a left and a right side,
+  each in one of three sizes:
+  - Small is the size of the Inbox box, 22 by 4.
+  - Medium is the full width of a side, as tall as that widget needs.
+  - Large is the whole of a side or half of it, chosen while arranging. A half
+    one stays half even with room under it.
+
+  Each size up shows more of the same thing: Grades at Large, for example, is
+  every course's grade plus the newest assignment scores. The first six are
+  Calendar, To do, Inbox, Announcements, Grades and Recent files. To do adds
+  one read, Canvas's missing-work list. Grades shows saved copies first and
+  reads in the background. Recent files are the files downloaded or opened
+  here, not the images saved automatically with a page.
 - **Current grade on the course list.** One switch for all courses, in the
   `Space` menu, saved locally like hidden courses.
 - **New feedback.** An assignment whose instructor comments have not been seen
