@@ -38,6 +38,8 @@ pub enum ResourceKey {
     Conversations(String),
     /// One Inbox conversation with its messages.
     Conversation(String),
+    /// Missing work across every course, for the home screen's To do.
+    Missing,
 }
 
 impl ResourceKey {
@@ -80,6 +82,7 @@ impl ResourceKey {
             ResourceKey::Conversation(c) if ok(c) => {
                 format!("conversation-{}", c.replace('~', "_"))
             }
+            ResourceKey::Missing => "missing".to_string(),
             _ => return None,
         };
         Some(name + ".json")
@@ -104,6 +107,7 @@ impl ResourceKey {
             ResourceKey::Pages(_) => "pages",
             ResourceKey::Conversations(_) => "inbox",
             ResourceKey::Conversation(_) => "conversation",
+            ResourceKey::Missing => "missing work",
         }
     }
 }

@@ -199,6 +199,9 @@ impl Executor {
                 ResourceKey::Conversation(c) => crate::inbox::detail(&client, c)
                     .await
                     .map(|(v, s)| (Payload::Conversation(Box::new(v)), s)),
+                ResourceKey::Missing => crate::calendar::read_missing(&client)
+                    .await
+                    .map(|(v, s)| (Payload::Missing(v), s)),
             };
             let at = Utc::now();
             if let Ok((payload, _)) = &result {
@@ -219,6 +222,7 @@ impl Executor {
                     Payload::Grades(v) => store.save(&key, v.as_ref(), at),
                     Payload::Pages(v) => store.save(&key, v, at),
                     Payload::Conversations(v) => store.save(&key, v, at),
+                    Payload::Missing(v) => store.save(&key, v, at),
                     Payload::Conversation(v) => {
                         store.save(&key, v.as_ref(), at);
                         // Saved conversation bodies stay within the agreed cap.

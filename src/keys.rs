@@ -53,6 +53,13 @@ pub enum Act {
     SignIn,
     Reply,
     NewMessage,
+    /// Arrange the home screen's widgets.
+    EditHome,
+    /// While arranging: the selected widget one size up, or down.
+    Bigger,
+    Smaller,
+    AddWidget,
+    RemoveWidget,
     InputDone,
     InputCancel,
     InputComplete,
@@ -63,7 +70,7 @@ pub enum Act {
 
 impl Act {
     #[cfg(test)]
-    pub const ALL: [Act; 41] = [
+    pub const ALL: [Act; 46] = [
         Act::Up,
         Act::Down,
         Act::Left,
@@ -99,6 +106,11 @@ impl Act {
         Act::SignIn,
         Act::Reply,
         Act::NewMessage,
+        Act::EditHome,
+        Act::Bigger,
+        Act::Smaller,
+        Act::AddWidget,
+        Act::RemoveWidget,
         Act::InputDone,
         Act::InputCancel,
         Act::InputComplete,
@@ -143,9 +155,17 @@ pub enum Scope {
     Day,
     /// The Inbox screen: the folders and their conversations.
     Inbox,
-    /// The home screen's Inbox box has focus. It shows a count and opens the
-    /// Inbox screen; the folders and conversations are not here.
-    InboxWidget,
+    /// A Small widget on the home screen has focus. It shows one thing,
+    /// and `Enter` opens it.
+    SmallWidget,
+    /// A Medium or Large widget that lists things has focus.
+    ListWidget,
+    /// The home screen's Recent files has focus.
+    RecentFiles,
+    /// Arranging the home screen's widgets.
+    HomeEdit,
+    /// Choosing a widget to add.
+    WidgetPicker,
     /// An open Inbox conversation.
     Conversation,
     Assignment,
@@ -341,18 +361,73 @@ pub static BINDINGS: &[Binding] = &[
     b(Act::Back, &[ESC, BACKSPACE], &[Inbox], "home")
         .title("Back to the home screen")
         .hint(7),
-    b(Act::Open, &[ENTER, RIGHT, ch('l')], &[InboxWidget], "open")
-        .title("Open the Inbox")
+    // Home-screen widgets. A Small one shows one thing, so the arrows move
+    // to the next widget rather than fall through to the course list hidden
+    // behind it; a bigger one lists things, and the arrows go down its list.
+    b(Act::Open, &[ENTER, RIGHT, ch('l')], &[SmallWidget], "open")
+        .title("Open what the widget shows")
         .hint(1),
-    // The home screen keeps room for more of these boxes, and the arrows are
-    // how they will be moved between. With one box there is nowhere to go,
-    // but the keys have to mean this rather than fall through to the course
-    // list hidden behind the box.
-    b(Act::Up, &[UP, ch('k')], &[InboxWidget], "widget").title("Previous widget"),
-    b(Act::Down, &[DOWN, ch('j')], &[InboxWidget], "widget").title("Next widget"),
-    b(Act::Back, &[ESC, BACKSPACE], &[InboxWidget], "courses")
+    b(Act::Up, &[UP, ch('k')], &[SmallWidget], "widget").title("Previous widget"),
+    b(Act::Down, &[DOWN, ch('j')], &[SmallWidget], "widget")
+        .title("Next widget")
+        .hint(2)
+        .shown("↑↓"),
+    b(Act::Up, &[UP, ch('k')], &[ListWidget], "select").title("Previous entry"),
+    b(Act::Down, &[DOWN, ch('j')], &[ListWidget], "select")
+        .title("Next entry")
+        .hint(1)
+        .shown("↑↓"),
+    b(Act::Open, &[ENTER, RIGHT, ch('l')], &[ListWidget], "open")
+        .title("Open the selected entry")
+        .hint(2),
+    b(Act::Back, &[ESC, BACKSPACE], &[SmallWidget, ListWidget], "courses")
         .title("Back to the course list")
         .hint(7),
+    // Arranging the home screen. Picking a widget up is what makes the
+    // arrows move it, so selecting and moving share the same keys.
+    b(Act::Up, &[UP, ch('k')], &[HomeEdit], "select")
+        .title("The widget above, or move the one picked up"),
+    b(Act::Down, &[DOWN, ch('j')], &[HomeEdit], "select")
+        .title("The widget below, or move the one picked up")
+        .hint(1)
+        .shown("↑↓←→"),
+    b(Act::Left, &[LEFT, ch('h')], &[HomeEdit], "side")
+        .title("The left side, or move the widget there"),
+    b(Act::Right, &[RIGHT, ch('l')], &[HomeEdit], "side")
+        .title("The right side, or move the widget there"),
+    b(Act::Open, &[ENTER], &[HomeEdit], "move")
+        .title("Pick the widget up to move it, or put it down")
+        .hint(2),
+    b(Act::Bigger, &[ch('+'), ch('=')], &[HomeEdit], "size")
+        .title("Make the widget bigger")
+        .hint(3)
+        .shown("+/-"),
+    b(Act::Smaller, &[ch('-')], &[HomeEdit], "smaller").title("Make the widget smaller"),
+    b(Act::AddWidget, &[ch('a')], &[HomeEdit], "add")
+        .title("Add a widget")
+        .hint(4),
+    b(
+        Act::RemoveWidget,
+        &[ch('x'), Key::Code(KeyCode::Delete)],
+        &[HomeEdit],
+        "remove",
+    )
+    .title("Take the widget off the home screen")
+    .hint(5),
+    b(Act::Back, &[ESC], &[HomeEdit], "done")
+        .title("Finish arranging")
+        .hint(6),
+    b(Act::Up, &[UP, ch('k')], &[WidgetPicker], "move").title("Previous widget"),
+    b(Act::Down, &[DOWN, ch('j')], &[WidgetPicker], "move")
+        .title("Next widget")
+        .hint(1)
+        .shown("↑↓"),
+    b(Act::Open, &[ENTER], &[WidgetPicker], "add")
+        .title("Add the selected widget")
+        .hint(2),
+    b(Act::Back, &[ESC], &[WidgetPicker], "cancel")
+        .title("Add nothing")
+        .hint(3),
     b(Act::Up, &[UP, ch('k')], &[List, Page, Help], "move").title("Move up"),
     b(Act::Down, &[DOWN, ch('j')], &[List], "move")
         .title("Move down")
@@ -407,10 +482,14 @@ pub static BINDINGS: &[Binding] = &[
         .hint(6),
     b(Act::PrevSection, &[BACKTAB], &[CourseTabs], "previous tab").title("Previous tab"),
     b(Act::NextSection, &[TAB], &[Courses], "section")
-        .title("Move between the courses, the calendar and the Inbox")
+        .title("Move between the course list and the widgets")
         .hint(6),
     b(Act::PrevSection, &[BACKTAB], &[Courses], "section")
-        .title("Move back between the courses, the calendar and the Inbox"),
+        .title("Move back between the course list and the widgets"),
+    b(Act::EditHome, &[ch('E')], &[Courses], "arrange")
+        .title("Arrange the home screen's widgets")
+        .menu('E', Group::Here)
+        .hint(6),
     b(Act::NextSection, &[TAB], &[Sections], "next section")
         .title("Next section (text, files & links, submissions, feedback)")
         .hint(5),
@@ -442,7 +521,7 @@ pub static BINDINGS: &[Binding] = &[
         .hint(98)
         .shown("Space"),
     b(Act::Menu, &[ch(' ')], &[Menu], "close").title("Close the actions menu"),
-    b(Act::Help, &[ch('?')], &[Screen, Menu, Help], "help")
+    b(Act::Help, &[ch('?')], &[Screen, Menu, Help, HomeEdit], "help")
         .title("Keys and help")
         .menu('?', Group::App)
         .hint(99),
@@ -470,7 +549,7 @@ pub static BINDINGS: &[Binding] = &[
         .title("Download all files")
         .menu('D', Group::Here)
         .hint(6),
-    b(Act::ShowFolder, &[ch('e')], &[Files, Links], "folder")
+    b(Act::ShowFolder, &[ch('e')], &[Files, Links, RecentFiles], "folder")
         .title("Show in File Explorer")
         .menu('e', Group::Selected)
         .hint(5),
@@ -818,7 +897,10 @@ mod tests {
             vec![Screen, List, Courses],
             vec![Screen, Courses, Calendar],
             vec![Screen, Courses, Day],
-            vec![Screen, Courses, InboxWidget],
+            vec![Screen, Courses, SmallWidget],
+            vec![Screen, Courses, ListWidget],
+            vec![Screen, Courses, SmallWidget, RecentFiles],
+            vec![Screen, Courses, ListWidget, RecentFiles],
             vec![Screen, Inbox],
             vec![Screen, Page, Sections, Conversation],
             vec![Screen, Page, Sections, Conversation, HasLinks],
@@ -856,6 +938,8 @@ mod tests {
             vec![Menu],
             vec![MenuSearch],
             vec![Help],
+            vec![HomeEdit],
+            vec![WidgetPicker],
         ]);
         out
     }
