@@ -2636,6 +2636,7 @@ impl App {
                         lib.keep(file_id);
                     }
                     if intent.open {
+                        lib.opened(file_id);
                         return vec![Effect::OpenPath(target)];
                     }
                     if !intent.quiet {
@@ -2741,6 +2742,9 @@ impl App {
                     }
                 }
                 if let Some(p) = placements.iter().find(|p| p.open) {
+                    if let Some(lib) = &self.library {
+                        lib.opened(&file_id);
+                    }
                     return vec![Effect::OpenPath(p.target.clone())];
                 }
                 if placements.iter().any(|p| !p.quiet) {
