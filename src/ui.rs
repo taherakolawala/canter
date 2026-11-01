@@ -4902,7 +4902,7 @@ mod tests {
             "all conversations",
             "Lab 3 feedback",
             "Office hours moved",
-            "Grades · * new feedback",
+            "Grades",
             "GPU Computing",
             "A 93%",
             "B 85%",
@@ -4978,7 +4978,7 @@ mod tests {
     }
 
     #[test]
-    fn a_widget_with_no_room_is_named_rather_than_lost() {
+    fn a_widget_with_no_room_is_named_only_while_arranging() {
         let (mut app, root) = widget_app("room");
         app.board = board(
             &[
@@ -4990,7 +4990,14 @@ mod tests {
         );
         let home = screen(&mut app, 100, 20);
         println!("{home}\n");
-        assert!(home.contains("doesn't fit · E to arrange"), "{home}");
+        assert!(!home.contains("doesn't fit"), "{home}");
+        app.update(Msg::Key(KeyEvent::new(
+            KeyCode::Char('E'),
+            KeyModifiers::NONE,
+        )));
+        let editing = screen(&mut app, 100, 20);
+        println!("{editing}\n");
+        assert!(editing.contains("doesn't fit"), "{editing}");
         let _ = std::fs::remove_dir_all(root);
     }
 

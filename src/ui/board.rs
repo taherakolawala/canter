@@ -45,7 +45,7 @@ pub(super) fn draw_home(frame: &mut Frame, area: Rect, app: &mut App, now: DateT
 }
 
 /// The line under the course list. While arranging it says so, and it names
-/// any widget with no room on this screen, so none goes missing unexplained.
+/// any widget with no room on this screen; otherwise it is a plain rule.
 fn draw_rule(frame: &mut Frame, area: Rect, app: &App, arranged: &Arranged) {
     if area.height == 0 {
         return;
@@ -61,17 +61,12 @@ fn draw_rule(frame: &mut Frame, area: Rect, app: &App, arranged: &Arranged) {
         vec![]
     };
     let mut right = vec![];
-    if !arranged.left_out.is_empty() {
+    if editing && !arranged.left_out.is_empty() {
         let names: Vec<&str> = arranged.left_out.iter().map(|w| w.name()).collect();
         let verb = if names.len() == 1 { "doesn't" } else { "don't" };
-        let hint = if editing { "" } else { " · E to arrange" };
         right.push(Span::styled(
-            format!(" {} {verb} fit{hint} ", names.join(", ")),
-            if editing {
-                theme::alert()
-            } else {
-                theme::muted()
-            },
+            format!(" {} {verb} fit ", names.join(", ")),
+            theme::alert(),
         ));
         right.push(Span::styled("──", theme::faint()));
     }
@@ -1144,14 +1139,7 @@ fn course_row(app: &App, course: &Course, width: usize) -> Line<'static> {
 fn grades_widget(frame: &mut Frame, spot: Spot, app: &App, now: DateTime<Utc>) {
     let sync = app.widget_sync(Widget::Grades);
     let courses = app.home_courses();
-    let small = spot.size == Size::Small;
-    let feedback = courses.iter().any(|c| app.course_has_new_feedback(&c.id));
-    let extra = if feedback && !small {
-        vec![Span::styled(" · * new feedback", theme::accent())]
-    } else {
-        vec![]
-    };
-    let inner = boxed(frame, app, spot, &sync, "Grades", extra, true);
+    let inner = boxed(frame, app, spot, &sync, "Grades", vec![], true);
     if let Some(line) = unloaded(&sync) {
         return note(frame, inner, line);
     }
@@ -1160,7 +1148,7 @@ fn grades_widget(frame: &mut Frame, spot: Spot, app: &App, now: DateTime<Utc>) {
     if entries.is_empty() {
         return note(frame, inner, Line::styled("No courses.", theme::muted()));
     }
-    if small {
+    if spot.size == Size::Small {
         // The newest score, then where that leaves its course.
         let lines = match &entries[0] {
             HomeEntry::Graded(g) => vec![
