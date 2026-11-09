@@ -44,23 +44,26 @@ pub fn usage() -> Option<Usage> {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(unix)]
 pub fn usage() -> Option<Usage> {
-    // Linux development fallback: /proc (assumes the usual 100 Hz clock tick).
-    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
-    let fields: Vec<&str> = stat.rsplit_once(')')?.1.split_whitespace().collect();
-    let ticks: f64 = fields.get(11)?.parse::<f64>().ok()? + fields.get(12)?.parse::<f64>().ok()?;
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let peak_kb: f64 = status
-        .lines()
-        .find(|l| l.starts_with("VmHWM:"))?
-        .split_whitespace()
-        .nth(1)?
-        .parse()
-        .ok()?;
+    let to_ms = |t: libc::timeval| t.tv_sec as f64 * 1000.0 + t.tv_usec as f64 / 1000.0;
+    // SAFETY: `usage` is a valid, writable rusage for the call to fill.
+    let usage = unsafe {
+        let mut usage: libc::rusage = std::mem::zeroed();
+        if libc::getrusage(libc::RUSAGE_SELF, &mut usage) != 0 {
+            return None;
+        }
+        usage
+    };
+    // The peak resident size is in bytes on macOS and in KiB elsewhere.
+    let peak_bytes = if cfg!(target_os = "macos") {
+        usage.ru_maxrss as f64
+    } else {
+        usage.ru_maxrss as f64 * 1024.0
+    };
     Some(Usage {
-        cpu_ms: ticks * 10.0,
-        peak_memory_mb: peak_kb / 1024.0,
+        cpu_ms: to_ms(usage.ru_utime) + to_ms(usage.ru_stime),
+        peak_memory_mb: peak_bytes / 1_048_576.0,
     })
 }
 

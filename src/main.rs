@@ -40,25 +40,31 @@ const HELP: &str = "canter — terminal Canvas interface
 
 Usage:
   canter                 Open the reader (signs in first if needed)
-  canter --diag          Also log request timings to the data folder
-  canter --login [--window | --python] [--show-password] [--fresh] [--chrome]
-                         Sign in again. By default canter drives Edge in
-                         the background; --window opens a small sign-in
-                         window you drive; --python runs the old helper
+  canter --login [--window] [--show-password] [--fresh] [--chrome]
+                         Sign in again. By default canter drives a browser
+                         (Edge, Chrome, Brave, ...) in the background;
+                         --window opens a small sign-in window you drive
   canter --logout        Delete the saved session and this account's saved copies
+  canter --diag          Also log request timings to the data folder
+  canter --version       Print the version
+
+Keys: arrows/jk move, Enter open, Esc back, / search, r refresh,
+      s/t/u submit files, text or a URL from an assignment,
+      o open in browser, L sign in, ? all keys, q quit
+Env:  CANTER_ORIGIN (default https://ufl.instructure.com),
+      CANTER_BROWSER (path to a Chromium-based browser),
+      CANTER_SIGNIN (background | window), CANTER_LIBRARY, CANTER_DATA_DIR
+
+Developer options (run from a source checkout; CANTER_HOME names it):
+  canter --login --python
+                         Sign in with the old Python helper (Windows only)
   canter --smoke [--course NAME] [--assignment NAME]
                          Read-only live check; writes benchmarks/private/smoke.json
   canter --dump DIR [--course NAME] [--assignment NAME]
                          Headless walk-through; writes rendered screens to DIR
   canter --bench [N] [--cold | --warm] [--terminal] [--course NAME] [--assignment NAME]
                          Time the workflow N times (default 10) for each condition;
-                         writes benchmarks/private/tui-bench*.json
-
-Keys: arrows/jk move, Enter open, Esc back, / search, r refresh,
-      s/t/u submit files, text or a URL from an assignment,
-      o open in browser, L sign in, q quit
-Env:  CANTER_ORIGIN (default https://ufl.instructure.com), CANTER_HOME,
-      CANTER_SIGNIN (background | window | python), CANTER_BROWSER";
+                         writes benchmarks/private/tui-bench*.json";
 
 fn value_after(args: &[String], flag: &str) -> Option<String> {
     args.iter()
@@ -72,6 +78,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{HELP}");
+        return;
+    }
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("canter {}", env!("CARGO_PKG_VERSION"));
         return;
     }
     let config = match config::Config::load() {
@@ -146,6 +156,13 @@ fn main() {
             }
         }
     };
+    if let Some(file) = protect::key_file_made() {
+        eprintln!(
+            "No system keychain was available, so the key to your saved session is in {}, \
+             readable only by you.",
+            file.display()
+        );
+    }
     std::process::exit(code);
 }
 

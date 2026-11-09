@@ -2,9 +2,17 @@
 name = "canter"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.89"
 description = "Keyboard-driven terminal reader for Canvas LMS"
 license = "MIT"
-publish = false
+repository = "https://github.com/taherakolawala/canter"
+homepage = "https://github.com/taherakolawala/canter"
+readme = "README.md"
+keywords = ["canvas", "lms", "tui", "terminal", "university"]
+categories = ["command-line-utilities"]
+# The crate is the Rust program; the Python tools, captures and notes stay
+# in the repository.
+include = ["/src", "/Cargo.toml", "/Cargo.lock", "/README.md", "/LICENSE"]
 
 [dependencies]
 chrono = { version = "0.4.45", features = ["serde"] }
@@ -27,10 +35,29 @@ unicode-width = "0.2.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+# Outside Windows the session is sealed with a key kept in the system
+# keychain: Keychain on macOS, the Secret Service elsewhere.
+chacha20poly1305 = "0.11.0"
+keyring-core = "1.0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Its own small executor, so a blocking call is safe inside Tokio.
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-async-io-crypto-rust"] }
+
 [profile.release]
 codegen-units = 4
 lto = "thin"
 strip = "debuginfo"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
 [dev-dependencies]
 tokio = { version = "1.53.3", features = ["test-util"] }

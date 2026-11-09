@@ -6202,11 +6202,14 @@ mod tests {
         let start = app.submission.as_ref().unwrap().start_directory.clone();
         assert!(start.ends_with(std::path::MAIN_SEPARATOR));
         assert_eq!(app.submission.as_ref().unwrap().input, start);
-        app.update(Msg::Paste("\"C:\\work\\lab.pdf\"".into()));
-        assert_eq!(
-            app.submission.as_ref().unwrap().input,
+        // Absolute on this system, so it replaces the starting folder.
+        let pasted = if cfg!(windows) {
             "\"C:\\work\\lab.pdf\""
-        );
+        } else {
+            "\"/work/lab.pdf\""
+        };
+        app.update(Msg::Paste(pasted.into()));
+        assert_eq!(app.submission.as_ref().unwrap().input, pasted);
         for _ in 0..12 {
             app.update(Msg::Key(KeyEvent::new_with_kind(
                 KeyCode::Backspace,
@@ -6214,14 +6217,11 @@ mod tests {
                 ratatui::crossterm::event::KeyEventKind::Repeat,
             )));
         }
-        assert_eq!(
-            app.submission.as_ref().unwrap().input,
-            "\"C:\\work\\lab.pdf\""
-        );
+        assert_eq!(app.submission.as_ref().unwrap().input, pasted);
         app.update(key(KeyCode::Backspace));
         assert_eq!(
             app.submission.as_ref().unwrap().input,
-            "\"C:\\work\\lab.pdf"
+            pasted.trim_end_matches('"')
         );
         app.update(Msg::Key(KeyEvent::new(
             KeyCode::Char('u'),

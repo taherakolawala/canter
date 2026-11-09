@@ -89,9 +89,8 @@ milestones 4 and 5), and the non-UF sign-in live check (milestone 9).
 
 ## Live checks still owed
 
-- **Sign-in in Rust.** `--logout` then `--login`, then `--smoke`; the same with
-  `--login --window`; then `CANTER_SIGNIN=python` to confirm the old helper
-  still runs. Nothing past UF's form has been exercised.
+- **Sign-in in Rust on macOS and Linux.** `--logout`, `--login`, then
+  `--smoke`. It has been in daily use on Windows since late October.
 - **A text-entry submission** to an assignment of your choosing (18 here take
   the type).
 - **A website-URL submission.** No assignment in the account uses `online_url`,
