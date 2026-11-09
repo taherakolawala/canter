@@ -457,7 +457,11 @@ fn run(
             .flatten()
     };
     let native = Native::new()?;
-    let url = start_url(&config.host);
+    // A login link the school gave wins over the site's own login page.
+    let url = config
+        .login_url
+        .clone()
+        .unwrap_or_else(|| start_url(&config.host));
     status.show("Connecting to Canvas", "");
     let mut browser = Browser::start(
         &executable,
