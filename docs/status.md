@@ -1,6 +1,6 @@
 # Project status
 
-Last updated: 2026-10-30. Update this file whenever a milestone moves.
+Last updated: 2026-11-09. Update this file whenever a milestone moves.
 
 ## Where things stand
 
@@ -8,12 +8,12 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
 
 | Milestone | State | What exists |
 | --- | --- | --- |
-| 1. Sign-in and request experiment | **Done**; Rust sign-in awaiting a live run | Terminal sign-in (GatorLink + Duo), now in Rust driving Edge over the DevTools protocol, with a separate phone-sized sign-in window as the fallback and the Python helper kept as a last resort; live-verified native REST and GraphQL reads; failure classification; [request policy](request-policy.md) |
+| 1. Sign-in and request experiment | **Done** | Terminal sign-in (GatorLink + Duo), now in Rust driving a Chromium-based browser over the DevTools protocol, in daily use on Windows since late October, with a separate phone-sized sign-in window as the fallback and the Python helper kept as a last resort; live-verified native REST and GraphQL reads; failure classification; [request policy](request-policy.md) |
 | 2. Reader vertical slice | **Done** | Courses → assignments → assignment detail, with saved copy + Syncing, refresh, back, open in browser |
 | 3. Rendering and network baseline | **Done** | Network, parse and draw timed separately (`--diag`, `--bench`); automated website baseline; the reader shows fresh data 6–10× sooner than the website ([baseline](../benchmarks/baseline-2026-10-20.md)) |
 | 4. Selective resource reuse | Partly | Saved copies for courses, assignments, files and announcements (always re-read on entry) |
 | 5. Prediction experiment | Not started | |
-| 6. Hardening and delivery | Not started | |
+| 6. Hardening and delivery | In progress | Builds and tests on Windows, macOS and Linux in CI; the session is saved on all three (DPAPI on Windows, the system keychain elsewhere); MIT licence, `--version`, crates.io metadata and a README for installing. Release packaging (prebuilt binaries and installers) remains. |
 | 7. Local file library | **Done** | `%USERPROFILE%\canter\<course>\Class Files` and `Assignment Files`; one stored copy per file shown in several places through hard links; change detection; safe names; 30-day clean-up of automatic images; downloads restricted to Canvas and its storage hosts. Verified live: download, install, hard link, internet mark. |
 | 8. Class Files and assignment attachments | **Done** | Files tab per course (folders, search across the course, download one, a folder or all, show in Explorer); files & links list on each assignment, numbered like the text; images downloaded with the assignment; other assignments open in the reader, everything else in the browser |
 | 9. Sign-in for other Canvas sites | Implemented, live check pending | The login helper uses an origin-scoped visible browser outside UF, with a separate protected session. Optional for the first live upload. |
@@ -21,11 +21,11 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
 
 ## What works today
 
-- **Sign-in.** canter itself runs UF's normal login in a hidden Edge window, driven from the terminal over the DevTools protocol (`src/signin.rs`); no Python and no Playwright. Offline tests pass; **no live run yet** (see [authentication.md](authentication.md) for the checks to make).
+- **Sign-in.** canter itself runs UF's normal login in a hidden browser window (Edge, Chrome or Chromium, Brave, Opera, Opera GX, Vivaldi or Arc, whichever is installed), driven from the terminal over the DevTools protocol (`src/signin.rs`); no Python and no Playwright. In daily use on Windows against UF since late October.
   - You type your GatorLink password and approve Duo (plain push or Verified Push), with progress shown on one spinner line.
   - `canter --login --window` instead opens a separate phone-sized sign-in window you drive, which is what a password manager, a passkey, a security key or a Duo phone call needs; it closes itself when sign-in finishes. That is also the default for Canvas sites other than UF (`CANTER_SIGNIN=background|window|python`).
   - `tools/terminal_login.py` is still there as a last resort: `canter --login --python`.
-  - The session is encrypted with Windows DPAPI under `%LOCALAPPDATA%\canter`.
+  - The session is encrypted with Windows DPAPI under `%LOCALAPPDATA%\canter`. On macOS and Linux it is encrypted under `~/.local/share/canter` with a key kept in the Keychain or the Secret Service, or in an owner-only `session.key` where no keychain runs (`src/protect.rs`).
   - The app starts sign-in itself if the saved session has expired at launch. Mid-session expiry shows a banner and waits for `L`.
 - **Reader** (`target\release\canter.exe`).
   - Shows course list, assignment list (due date, status, points) and assignment detail (deadline, availability, status, attempts, description with links).
@@ -110,8 +110,8 @@ How the pieces fit together is described in [architecture.md](architecture.md). 
 
 
 - **Sessions don't last long.** Two data points so far: both expired within a day (under 22 h), and each needed a password and Duo again.
-- **Sign-in needs a browser, not Python.** The reader is one Rust binary and drives Microsoft Edge (or Chrome) itself; only the `--python` fallback needs the project's Python environment and Playwright. Edge is still required, and the Rust path is unverified against UF live.
-- **Windows only** for now: session protection uses DPAPI.
+- **Sign-in needs a browser, not Python.** The reader is one Rust binary and drives a Chromium-based browser itself; only the `--python` fallback (Windows only) needs the project's Python environment and Playwright. Firefox and Safari can't be driven this way.
+- **macOS and Linux are less used.** They build and pass the tests in CI, and saving through the real Keychain and GNOME Keyring is tested there, but a live UF sign-in has so far only been run on Windows.
 - **Order of undated assignments** differs from Canvas in 1 of 17 courses (cosmetic).
 - **Back re-reads the list.** Returning to a list from a detail re-reads it, per the approved "fresh on every entry" rule. This costs one request per Back.
 - **Git Bash** may print sign-in progress as separate lines instead of one updating line. PowerShell and Windows Terminal show the spinner properly.
