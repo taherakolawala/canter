@@ -2,7 +2,7 @@
   <img src="assets/canter.svg" alt="canter" width="804">
 </p>
 
-A fast, keyboard-driven terminal interface for [Canvas LMS](https://www.instructure.com/canvas), built first for the University of Florida's Canvas (`ufl.instructure.com`).
+A fast, keyboard-driven terminal interface for [Canvas LMS](https://www.instructure.com/canvas). It works with any school's Canvas, and was built first for the University of Florida's (`ufl.instructure.com`).
 
 The Canvas web page for one assignment makes 183 requests (1.4 MB) before the assignment shows up. canter skips the web app and makes only the reads each screen needs:
 
@@ -31,6 +31,8 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/taherakolawala/canter/r
 
 The installer puts `canter` on your `PATH`. Open a new terminal and type `canter`. To update later, run the same command again.
 
+The first time it runs, canter asks for your school: paste your Canvas address (the one in your browser when you're on Canvas, like `canvas.school.edu`) or your school's login link. University of Florida students just press Enter. `canter --school` changes it later.
+
 **With Rust installed:** `cargo install canter`.
 
 You can also download the archive for your system from the [releases page](https://github.com/taherakolawala/canter/releases) and put `canter` anywhere on your `PATH`.
@@ -46,11 +48,13 @@ It covers sign in (GatorLink + Duo) → course list → assignment list → assi
 - **Files.** Each course has a Files tab that mirrors its Canvas folders, and each assignment lists its attachments and links. Files download into `canter/<course>/Class Files` or `Assignment Files/<assignment>` in your home folder and open in their default app. A file used in both places is stored once.
 - **Announcements.** A per-course tab lists all announcements newest-first, with author, posting date and Canvas read status. Open one to read its message and attachments; replies open in the browser. Opening a readable message marks it Read locally in the TUI, remembered across restarts. Canvas read status is unchanged. Files are fetched only when you choose them and go in `Announcement Files/<announcement-id>`.
 - File submissions are available from an assignment that accepts uploads. Text entry, modules, pages and discussions open in the browser for now. Quizzes and assessments are out of scope (see `docs/build-plan.md`).
-- To use a separate Canvas site such as Canvas Lite, set `CANTER_ORIGIN` to its HTTPS origin before launching. Its sign-in opens a visible browser and saves a separate, protected session.
+- **Any school.** `canter --school` takes your Canvas address or a login link. A link on the Canvas site (such as `/login/saml/2`) becomes the page sign-in starts on; a link to your school's own sign-on page does too, and canter then asks for the Canvas address as well. Each school keeps its own session and saved copies. `CANTER_ORIGIN` overrides the saved school for one run.
 
 ## How sign-in works
 
-Personal access tokens aren't used. canter runs the normal UF login itself, in a hidden browser window it drives over the DevTools protocol. You type your GatorLink username and password and approve Duo, all inside the terminal. `canter --login --window` opens a small sign-in window you drive yourself instead. Use it for a password manager, a passkey, a security key or a Duo phone call. Canvas sites other than UF use the window by default.
+Personal access tokens aren't used. canter runs the normal UF login itself, in a hidden browser window it drives over the DevTools protocol. You type your GatorLink username and password and approve Duo, all inside the terminal. `canter --login --window` opens a small sign-in window you drive yourself instead. Use it for a password manager, a passkey, a security key or a Duo phone call.
+
+Other schools always sign in through that window, starting at your school's login link if you gave one: you sign in as you normally would, and the window closes by itself once Canvas opens. File downloads work for Canvas hosted by Instructure, which is nearly every school; a school that runs Canvas on its own servers can sign in and read, but its downloads are refused.
 
 The browser runs with its own profile, separate from your everyday one, and closes once you're signed in. Set `CANTER_BROWSER` to a browser's full path if canter doesn't find yours.
 
@@ -74,6 +78,7 @@ The program was called TUICanvas until 2026-10-27. If a folder from that name is
 canter                 Open the reader (signs in first if needed)
 canter --login         Sign in again (--window to drive the sign-in window yourself)
 canter --logout        Delete the saved session and this account's saved copies
+canter --school        Choose your school (a Canvas address or a login link)
 canter --diag          Log request timings (no content) to the data folder
 canter --version       Print the version
 canter --help          Everything else, including the developer options

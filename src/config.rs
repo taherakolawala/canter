@@ -19,6 +19,13 @@ pub struct Config {
     /// `https://host` with no trailing slash.
     pub origin: String,
     pub host: String,
+    /// Where sign-in starts when the school gave a login link; otherwise
+    /// the Canvas site's own login page.
+    pub login_url: Option<String>,
+    /// Whether the school was chosen (saved, set by `CANTER_ORIGIN`, or UF
+    /// signed in before schools could be chosen). When not, the first
+    /// interactive run asks.
+    pub school_chosen: bool,
     /// Per-user application data: protected session and content snapshots.
     pub data_dir: PathBuf,
     /// Project checkout containing the login helper and private benchmark folder.
@@ -27,27 +34,36 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Result<Self, String> {
-        let origin =
-            std::env::var("CANTER_ORIGIN").unwrap_or_else(|_| DEFAULT_ORIGIN.to_string());
-        let host = parse_origin(&origin)?;
+        let data_dir = data_dir()?;
+        let (school, chosen) = match std::env::var("CANTER_ORIGIN") {
+            Ok(origin) => (
+                crate::school::School {
+                    origin,
+                    login_url: None,
+                },
+                true,
+            ),
+            Err(_) => match crate::school::load(&data_dir) {
+                Some(school) => (school, true),
+                // Someone signed in to UF before schools could be chosen
+                // keeps UF without being asked.
+                None => (crate::school::School::uf(), uf_session_exists(&data_dir)),
+            },
+        };
+        let host = parse_origin(&school.origin)?;
         Ok(Config {
             origin: format!("https://{host}"),
             host,
-            data_dir: data_dir()?,
+            login_url: school.login_url,
+            school_chosen: chosen,
+            data_dir,
             project_dir: project_dir(),
         })
     }
 
-    /// Protected session file, scoped to the configured Canvas host. On
-    /// Windows the name says it is sealed with DPAPI.
+    /// Protected session file, scoped to the configured Canvas host.
     pub fn session_path(&self) -> PathBuf {
-        let host = if self.host == "ufl.instructure.com" {
-            "ufl"
-        } else {
-            &self.host
-        };
-        let sealing = if cfg!(windows) { ".dpapi" } else { "" };
-        self.data_dir.join(format!("{host}.session{sealing}"))
+        session_path(&self.data_dir, &self.host)
     }
 
     pub fn cache_root(&self) -> PathBuf {
@@ -98,6 +114,18 @@ impl Config {
         };
         (script.is_file() && python.is_file()).then_some((python, self.project_dir.clone()))
     }
+}
+
+/// The session file for a Canvas host. On Windows the name says it is sealed
+/// with DPAPI.
+fn session_path(data_dir: &Path, host: &str) -> PathBuf {
+    let host = if host == DEFAULT_HOST { "ufl" } else { host };
+    let sealing = if cfg!(windows) { ".dpapi" } else { "" };
+    data_dir.join(format!("{host}.session{sealing}"))
+}
+
+fn uf_session_exists(data_dir: &Path) -> bool {
+    session_path(data_dir, DEFAULT_HOST).is_file()
 }
 
 fn signin_choice(setting: &str, host: &str) -> SignIn {

@@ -23,6 +23,7 @@ mod model;
 mod modules;
 mod procstats;
 mod protect;
+mod school;
 mod search;
 mod session;
 mod signin;
@@ -45,13 +46,15 @@ Usage:
                          (Edge, Chrome, Brave, ...) in the background;
                          --window opens a small sign-in window you drive
   canter --logout        Delete the saved session and this account's saved copies
+  canter --school [LINK] Choose your school: its Canvas address, or a login link
+                         (asked the first time canter runs)
   canter --diag          Also log request timings to the data folder
   canter --version       Print the version
 
 Keys: arrows/jk move, Enter open, Esc back, / search, r refresh,
       s/t/u submit files, text or a URL from an assignment,
       o open in browser, L sign in, ? all keys, q quit
-Env:  CANTER_ORIGIN (default https://ufl.instructure.com),
+Env:  CANTER_ORIGIN (a Canvas address; overrides the saved school),
       CANTER_BROWSER (path to a Chromium-based browser),
       CANTER_SIGNIN (background | window), CANTER_LIBRARY, CANTER_DATA_DIR
 
@@ -84,13 +87,35 @@ fn main() {
         println!("canter {}", env!("CARGO_PKG_VERSION"));
         return;
     }
-    let config = match config::Config::load() {
+    let load = || match config::Config::load() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(2);
         }
     };
+    let mut config = load();
+    if args.iter().any(|a| a == "--school") {
+        let given = value_after(&args, "--school").filter(|v| !v.starts_with('-'));
+        let code = choose_school(&config, given);
+        if code == 0 {
+            println!("Run canter to sign in.");
+        }
+        std::process::exit(code);
+    }
+    // The first run in a terminal asks which school; scripts and the
+    // developer options keep the default.
+    let developer = ["--smoke", "--bench", "--dump", "--logout"];
+    if !config.school_chosen
+        && std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && !args.iter().any(|a| developer.contains(&a.as_str()))
+    {
+        let code = choose_school(&config, None);
+        if code != 0 {
+            std::process::exit(code);
+        }
+        config = load();
+    }
     let course = value_after(&args, "--course").unwrap_or_else(|| "GPU".into());
     let assignment = value_after(&args, "--assignment").unwrap_or_else(|| "Lab-2".into());
     let code = if args.iter().any(|a| a == "--smoke") {
@@ -164,6 +189,33 @@ fn main() {
         );
     }
     std::process::exit(code);
+}
+
+/// Ask for the school and save it.
+fn choose_school(config: &config::Config, given: Option<String>) -> i32 {
+    if std::env::var_os("CANTER_ORIGIN").is_some() {
+        eprintln!("Note: CANTER_ORIGIN is set, and it overrides the school chosen here.");
+    }
+    match school::choose(given) {
+        Ok(Some(chosen)) => match school::save(&config.data_dir, &chosen) {
+            Ok(()) => {
+                println!("canter will open {}.", chosen.origin);
+                0
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        },
+        Ok(None) => {
+            eprintln!("No school was chosen.");
+            1
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            1
+        }
+    }
 }
 
 /// Which sign-in path `--login` runs: the flags first, then the setting.

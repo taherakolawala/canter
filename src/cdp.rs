@@ -203,6 +203,19 @@ pub fn first_page_target(targets: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The address of every page (tab or window) in a `Target.getTargets` answer.
+pub fn page_urls(targets: &Value) -> Vec<String> {
+    targets
+        .get("targetInfos")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|info| info.get("type").and_then(Value::as_str) == Some("page"))
+        .filter_map(|info| info.get("url").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +339,13 @@ mod tests {
             {"type": "page", "targetId": "p2"}
         ]});
         assert_eq!(first_page_target(&targets).unwrap(), "p1");
+        let with_urls = json!({"targetInfos": [
+            {"type": "service_worker", "targetId": "w1", "url": "https://a.example/sw.js"},
+            {"type": "page", "targetId": "p1", "url": "https://a.example/"},
+            {"type": "page", "targetId": "p2", "url": "https://b.example/x"}
+        ]});
+        assert_eq!(page_urls(&with_urls), ["https://a.example/", "https://b.example/x"]);
+        assert!(page_urls(&json!({})).is_empty());
         assert!(first_page_target(&json!({"targetInfos": []})).is_none());
         assert!(first_page_target(&json!({})).is_none());
     }

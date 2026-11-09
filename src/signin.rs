@@ -160,6 +160,14 @@ pub fn split_url(url: &str) -> Option<(String, String)> {
     Some((authority.to_ascii_lowercase(), path.to_string()))
 }
 
+/// The first page that is on Canvas past its login pages, whichever tab or
+/// window it is in.
+pub fn canvas_page<'a>(urls: &'a [String], canvas_host: &str) -> Option<&'a str> {
+    urls.iter().map(String::as_str).find(|url| {
+        split_url(url).is_some_and(|(host, path)| host == canvas_host && !path.starts_with("/login"))
+    })
+}
+
 /// The origins the background mode will drive: Canvas, its identity provider
 /// and Duo. The window mode does not read or type into pages, so it does not
 /// restrict them.
@@ -457,7 +465,11 @@ fn run(
             .flatten()
     };
     let native = Native::new()?;
-    let url = start_url(&config.host);
+    // A login link the school gave wins over the site's own login page.
+    let url = config
+        .login_url
+        .clone()
+        .unwrap_or_else(|| start_url(&config.host));
     status.show("Connecting to Canvas", "");
     let mut browser = Browser::start(
         &executable,
@@ -584,6 +596,31 @@ impl Flow<'_> {
             if !browser.running() {
                 return Err(SignInError::WindowClosed);
             }
+            // The window mode never reads or types into a page. It watches
+            // every page in the browser for Canvas, because a school's portal
+            // often opens Canvas in a new tab or window, and the page it
+            // started on may be closed by then.
+            if self.options.mode == Mode::Window {
+                let targets = cdp
+                    .call(
+                        None,
+                        "Target.getTargets",
+                        json!({}),
+                        crate::cdp::COMMAND_TIMEOUT,
+                    )
+                    .map_err(from_cdp)?;
+                let urls = crate::cdp::page_urls(&targets);
+                let url = canvas_page(&urls, &self.config.host).unwrap_or_default();
+                if let Some(session_file) = self.try_canvas(cdp, url)? {
+                    return Ok(session_file);
+                }
+                self.status
+                    .show("Finish signing in in the sign-in window", "q cancel");
+                if poll_key() == Some('q') {
+                    return Err(SignInError::Cancelled);
+                }
+                continue;
+            }
             let url = {
                 let mut page = Page {
                     cdp,
@@ -600,19 +637,6 @@ impl Flow<'_> {
             }
             let seconds = self.url_since.1.elapsed().as_secs_f64();
 
-            // The window mode never reads or types into the page. It watches
-            // for the Canvas session and closes the window.
-            if self.options.mode == Mode::Window {
-                if let Some(session_file) = self.try_canvas(cdp, &url)? {
-                    return Ok(session_file);
-                }
-                self.status
-                    .show("Finish signing in in the sign-in window", "q cancel");
-                if poll_key() == Some('q') {
-                    return Err(SignInError::Cancelled);
-                }
-                continue;
-            }
             if let Some(session_file) = self.try_canvas(cdp, &url)? {
                 return Ok(session_file);
             }
@@ -1119,6 +1143,29 @@ mod tests {
         assert!(!trusted("https://example.com/", UF_CANVAS_HOST));
         // Another Canvas site does not share UF's identity provider.
         assert!(!trusted("https://login.ufl.edu/", "canvas.example.edu"));
+    }
+
+    #[test]
+    fn canvas_is_found_in_whichever_tab_it_opened_in() {
+        let urls = |list: &[&str]| list.iter().map(|u| u.to_string()).collect::<Vec<_>>();
+        let host = "sdhc.instructure.com";
+        // A portal opened Canvas in a second window.
+        let open = urls(&[
+            "https://launchpad.classlink.com/hcpshub",
+            "https://sdhc.instructure.com/?login_success=1",
+        ]);
+        assert_eq!(
+            canvas_page(&open, host),
+            Some("https://sdhc.instructure.com/?login_success=1")
+        );
+        // Canvas's own login pages are still the hand-off, not Canvas.
+        let handing_off = urls(&[
+            "https://launchpad.classlink.com/hcpshub",
+            "https://sdhc.instructure.com/login/saml",
+        ]);
+        assert_eq!(canvas_page(&handing_off, host), None);
+        assert_eq!(canvas_page(&urls(&["https://sdhc.instructure.com.evil.example/"]), host), None);
+        assert_eq!(canvas_page(&[], host), None);
     }
 
     #[test]
