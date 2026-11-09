@@ -1,7 +1,5 @@
 # Screenshots
 
-Sample data, not a real account.
-
 **Home.** Your courses, with a calendar, to-do list, grades, inbox and announcements underneath. 
 
 <img src="../assets/screenshots/home.png" alt="Home screen" width="100%">
