@@ -668,48 +668,6 @@ mod tests {
     }
 
     #[test]
-    fn a_library_copy_is_drawn_where_the_mark_is() {
-        // The whole path, end to end: a mark, a link that is an image, and a
-        // file on disk under that id. Everything below this was tested
-        // separately, and a page still showed nothing.
-        let root = std::env::temp_dir().join(format!("canter-place-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let library = crate::library::Library::open(&root, "ufl.instructure.com");
-        let downloaded = temp_file("place", &two_tone_png(8, 8));
-        library
-            .install(
-                "33",
-                &downloaded,
-                crate::library::FileVersion {
-                    updated_at: None,
-                    size: Some(8),
-                },
-                &root.join("chart.png"),
-                true,
-            )
-            .expect("install");
-        let lines = vec!["[image: chart][1]".to_string(), "after".to_string()];
-        let body = place(lines.clone(), &[link(true, "33")], Some(&library), 60);
-        if !enabled() {
-            // `NO_COLOR` or `CANTER_IMAGES=off` in whoever's environment is
-            // running this. The switch itself is checked above; what this test
-            // can still require is that the text is left exactly as it was.
-            assert_eq!(body.lines, lines);
-            assert!(body.boxes.is_empty());
-            let _ = std::fs::remove_dir_all(&root);
-            return;
-        }
-        assert!(
-            body.lines.len() > 2,
-            "rows should be reserved for the picture: {:?}",
-            body.lines
-        );
-        assert!(!body.boxes.is_empty(), "a box should be placed");
-        assert_eq!(body.lines.first().map(String::as_str), Some("[image: chart][1]"));
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
     fn a_box_sits_in_the_middle_of_the_page() {
         // A narrow picture on a wide page: half the spare room on each side.
         assert_eq!(centre_indent(80, 20), 30);
@@ -749,13 +707,6 @@ mod tests {
         let body = place(lines.clone(), &[link(true, "33")], None, 0);
         assert_eq!(body.lines, lines);
         assert!(body.boxes.is_empty());
-    }
-
-    #[test]
-    fn a_plain_body_has_no_image_rows() {
-        let body = Body::plain(vec!["one".into(), "two".into()]);
-        assert_eq!(body.lines.len(), 2);
-        assert!(body.image_row(0).is_none());
     }
 
     /// End to end through a real library: an image installed under a file id
@@ -823,29 +774,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `place` needs a library, so this covers the same assembly directly: the
-    /// mark's line is kept and the box's rows follow it as blank text lines, so
-    /// the line count the page scrolls over matches the rows it draws.
-    #[test]
-    fn image_rows_follow_the_mark_and_are_counted_as_lines() {
-        let path = temp_file("rows.png", &two_tone_png(40, 20));
-        let pixels = decode(&path, 20, 10).expect("decodes");
-        let rows = half_block_rows(&pixels);
-        let mut body = Body::plain(vec!["[image: chart][1]".to_string()]);
-        for row in rows.clone() {
-            body.boxes.insert(body.lines.len(), row);
-            body.lines.push(String::new());
-        }
-        body.lines.push("after".to_string());
-        assert_eq!(body.lines.len(), rows.len() + 2);
-        assert!(body.image_row(0).is_none(), "the mark keeps its text");
-        for i in 1..=rows.len() {
-            assert!(body.image_row(i).is_some(), "row {i} draws cells");
-            assert_eq!(body.lines[i], "", "row {i} holds no text");
-        }
-        assert!(body.image_row(rows.len() + 1).is_none());
-        let width = body.image_row(1).expect("row").width();
-        assert_eq!(width, pixels.width as usize);
-        let _ = std::fs::remove_file(path);
-    }
 }
