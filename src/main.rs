@@ -146,6 +146,13 @@ fn main() {
             }
         }
     };
+    if let Some(file) = protect::key_file_made() {
+        eprintln!(
+            "No system keychain was available, so the key to your saved session is in {}, \
+             readable only by you.",
+            file.display()
+        );
+    }
     std::process::exit(code);
 }
 

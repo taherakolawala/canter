@@ -362,21 +362,32 @@ impl SessionFile {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(SessionError("Saved session could not be read.".into())),
         };
-        let plain = protect::unprotect(&sealed).map_err(SessionError)?;
+        let plain = protect::unprotect(&sealed, folder(path)).map_err(SessionError)?;
         Self::parse(&plain, origin).map(Some)
     }
 
     pub fn save(&mut self, path: &Path) -> Result<(), SessionError> {
         self.saved_at = now_seconds();
-        let sealed = protect::protect(&self.to_json()).map_err(SessionError)?;
         let fail = || SessionError("Session could not be saved.".into());
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|_| fail())?;
-        }
-        let tmp = path.with_extension("dpapi.tmp");
-        std::fs::write(&tmp, sealed).map_err(|_| fail())?;
+        std::fs::create_dir_all(folder(path)).map_err(|_| fail())?;
+        let sealed = protect::protect(&self.to_json(), folder(path)).map_err(SessionError)?;
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(".tmp");
+        let tmp = std::path::PathBuf::from(tmp);
+        let mut file = std::fs::OpenOptions::new();
+        file.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut file, 0o600);
+        std::io::Write::write_all(&mut file.open(&tmp).map_err(|_| fail())?, &sealed)
+            .map_err(|_| fail())?;
         std::fs::rename(&tmp, path).map_err(|_| fail())
     }
+}
+
+/// The folder a session file is in, which also holds its key file where
+/// there is one.
+fn folder(path: &Path) -> &Path {
+    path.parent().unwrap_or(Path::new("."))
 }
 
 #[cfg(test)]

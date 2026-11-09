@@ -38,14 +38,16 @@ impl Config {
         })
     }
 
-    /// Protected session file, scoped to the configured Canvas host.
+    /// Protected session file, scoped to the configured Canvas host. On
+    /// Windows the name says it is sealed with DPAPI.
     pub fn session_path(&self) -> PathBuf {
-        let name = if self.host == "ufl.instructure.com" {
-            "ufl.session.dpapi".to_string()
+        let host = if self.host == "ufl.instructure.com" {
+            "ufl"
         } else {
-            format!("{}.session.dpapi", self.host)
+            &self.host
         };
-        self.data_dir.join(name)
+        let sealing = if cfg!(windows) { ".dpapi" } else { "" };
+        self.data_dir.join(format!("{host}.session{sealing}"))
     }
 
     pub fn cache_root(&self) -> PathBuf {

@@ -29,6 +29,17 @@ windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Outside Windows the session is sealed with a key kept in the system
+# keychain: Keychain on macOS, the Secret Service elsewhere.
+chacha20poly1305 = "0.11.0"
+keyring-core = "1.0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1.0.2", features = ["keychain"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# Its own small executor, so a blocking call is safe inside Tokio.
+zbus-secret-service-keyring-store = { version = "1.0.1", features = ["rt-async-io-crypto-rust"] }
 
 [profile.release]
 codegen-units = 4
