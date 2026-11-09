@@ -168,6 +168,7 @@ dependencies = [
  "html2text",
  "http-body",
  "image",
+ "libc",
  "open",
  "ratatui",
  "reqwest",

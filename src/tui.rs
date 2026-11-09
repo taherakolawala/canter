@@ -362,7 +362,14 @@ fn reveal(path: &Path) -> Result<(), ()> {
                 .map(|_| ())
                 .map_err(|_| ());
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        return std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|_| ());
+        #[cfg(not(any(windows, target_os = "macos")))]
         return open::that_detached(path.parent().unwrap_or(path)).map_err(|_| ());
     }
     std::fs::create_dir_all(path).map_err(|_| ())?;

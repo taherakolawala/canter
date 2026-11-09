@@ -94,7 +94,9 @@ impl SignInError {
     pub fn message(&self) -> String {
         match self {
             SignInError::NoBrowser(what) => format!(
-                "{what} was not found. Install it, set CANTER_BROWSER to its path, \
+                "Neither {what} nor another supported browser (Edge, Chrome, Chromium, \
+                 Brave, Opera, Opera GX, Vivaldi or Arc) was found. \
+                 Install one, set CANTER_BROWSER to its path, \
                  or sign in with the Python helper (canter --login --python)."
             ),
             SignInError::WrongPassword => {
