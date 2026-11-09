@@ -54,5 +54,10 @@ codegen-units = 4
 lto = "thin"
 strip = "debuginfo"
 
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
 [dev-dependencies]
 tokio = { version = "1.53.3", features = ["test-util"] }
