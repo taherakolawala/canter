@@ -4668,7 +4668,7 @@ mod tests {
     /// planner around today, missing work, conversations, grades and two
     /// downloaded files. The data is put in place directly; how it is read
     /// is the app's tests' business.
-    fn widget_app(tag: &str) -> (App, std::path::PathBuf) {
+    pub(super) fn widget_app(tag: &str) -> (App, std::path::PathBuf) {
         use crate::app::Resource;
         use crate::calendar::{Item, Kind, Progress};
         use chrono::{Duration, TimeZone};
@@ -4807,7 +4807,7 @@ mod tests {
         (app, root)
     }
 
-    fn board(left: &[(Widget, Size)], right: &[(Widget, Size)]) -> crate::home::Board {
+    pub(super) fn board(left: &[(Widget, Size)], right: &[(Widget, Size)]) -> crate::home::Board {
         let tiles = |side: &[(Widget, Size)]| {
             side.iter()
                 .map(|&(widget, size)| crate::home::Tile { widget, size })
@@ -5205,6 +5205,23 @@ mod preview {
             ]),
         );
         let mut page = String::from("<html><body style=\"background:#202020;padding:12px\">");
+        // The home screen as it is after sign-in: courses, then the widgets
+        // the widget tests fill with sample data.
+        {
+            use crate::home::{Size, Widget};
+            let (mut home, root) = super::tests::widget_app("preview");
+            home.board = super::tests::board(
+                &[(Widget::Calendar, Size::LargeWhole)],
+                &[
+                    (Widget::Todo, Size::Medium),
+                    (Widget::Grades, Size::Medium),
+                    (Widget::Inbox, Size::Small),
+                    (Widget::Announcements, Size::Small),
+                ],
+            );
+            page += &html(&mut home, 120, 34);
+            let _ = std::fs::remove_dir_all(root);
+        }
         page += &html(&mut app, 104, 9);
         let effects = app.update(enter());
         let a = |id: &str, name: &str, hours: i64, sub: Option<Submission>| AssignmentSummary {
