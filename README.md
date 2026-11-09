@@ -6,6 +6,7 @@ canter is a Rust-based terminal (TUI) client for Canvas by Instructure. It shows
 
 <p align="center">
   <a href="#setup">Setup</a> ·
+  <a href="#screenshots">Screenshots</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#support">Support</a>
 </p>
@@ -25,6 +26,16 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/taherakolawala/canter/r
 ```
 
 Open a new terminal and type `canter`. On first run, paste your school's Canvas address or login link (UF: just press Enter). Signing in needs Edge, Chrome, Brave, Opera, Vivaldi or Arc.
+
+## Screenshots
+
+<img src="assets/screenshots/home.png" alt="Home: courses, calendar, to do, grades, inbox and announcements" width="100%">
+
+<img src="assets/screenshots/assignments.png" alt="A course's assignments" width="100%">
+
+<img src="assets/screenshots/assignment.png" alt="An assignment with its files and links" width="100%">
+
+<img src="assets/screenshots/files.png" alt="A course's files" width="100%">
 
 ## How it works
 
