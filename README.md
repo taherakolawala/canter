@@ -25,6 +25,8 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/taherakolawala/can
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/taherakolawala/canter/releases/latest/download/canter-installer.sh | sh
 ```
 
+**With Rust installed:** `cargo install canter`
+
 Open a new terminal and type `canter`. On first run, paste your school's Canvas address or login link (UF: just press Enter). Signing in needs Edge, Chrome, Brave, Opera, Vivaldi or Arc.
 
 ## How it works
